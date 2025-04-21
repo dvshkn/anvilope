@@ -7,8 +7,11 @@ use async_imap::extensions::idle::IdleResponse;
 use async_imap::imap_proto::MailboxDatum;
 use async_imap::imap_proto::types::Response;
 use async_imap::types::Capability;
-use log::error;
-use log::info;
+use log::{
+    debug,
+    error,
+    info,
+};
 use tokio::sync::Mutex;
 use std::time::Duration;
 use std::sync::Arc;
@@ -19,7 +22,7 @@ use crate::config::Account;
 
 use super::AnvilopeTlsStream;
 
-const IDLE_DURATION: Duration = Duration::from_secs(20*60);
+const IDLE_DURATION: Duration = Duration::from_secs(5*60);
 
 #[derive(PartialEq)]
 pub enum AccountListenerEvent {
@@ -95,7 +98,10 @@ impl AccountListener {
                         ord,
                     });
                 } else {
-                    panic!("unexpected new data! {:#?}", data);
+                    // other activity happening in the mailbox, resume idle
+                    debug!("other new data received, resuming idle...");
+                    let account_key = self.account_key.to_owned();
+                    return Ok(AnvilopeEvent::AccountIdleTimeout { account_key });
                 }
             }
             IdleResponse::ManualInterrupt => {
