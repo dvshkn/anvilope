@@ -1,8 +1,9 @@
 use anyhow::{
+    anyhow,
     Error,
     Result,
 };
-use async_imap::extensions::idle::Handle;
+use async_imap::Session;
 use async_imap::extensions::idle::IdleResponse;
 use async_imap::imap_proto::MailboxDatum;
 use async_imap::imap_proto::types::Response;
@@ -13,6 +14,7 @@ use log::{
     info,
 };
 use tokio::sync::Mutex;
+use std::cell::Cell;
 use std::time::Duration;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
@@ -22,7 +24,9 @@ use crate::config::Account;
 
 use super::AnvilopeTlsStream;
 
-const IDLE_DURATION: Duration = Duration::from_secs(5*60);
+// TODO: make this configurable because certain firewalls might require a lower
+//       duration to keep connection alive
+const IDLE_DURATION: Duration = Duration::from_secs(20*60);
 
 #[derive(PartialEq)]
 pub enum AccountListenerEvent {
@@ -33,7 +37,10 @@ pub enum AccountListenerEvent {
 
 pub struct AccountListener {
     pub account_key: String,
-    pub idle_handle: Handle<AnvilopeTlsStream>,
+    // Option type is to handle how async-imap essentially destroys the session
+    // object when entering idle state and gives you back a new one when leaving
+    // idle
+    pub session_cell: Cell<Option<Session<AnvilopeTlsStream>>>,
     pub root_tx: Sender<AnvilopeEvent>,
 }
 
@@ -59,12 +66,9 @@ impl AccountListener {
 
         info!("selecting mailbox INBOX");
         session.select("INBOX").await?;
+        let session_cell = Cell::new(Some(session));
 
-        info!("starting IMAP idle");
-        let mut idle_handle = session.idle();
-        idle_handle.init().await?;
-
-        Ok(AccountListener { account_key: account._key.to_owned(), root_tx, idle_handle })
+        Ok(AccountListener { account_key: account._key.to_owned(), root_tx, session_cell })
     }
 
     pub fn spawn(listener_ref: Arc<Mutex<AccountListener>>) -> () {
@@ -76,6 +80,8 @@ impl AccountListener {
                     local_listener.root_tx.send(event).await.unwrap();
                 }
                 Err(err) => {
+                    // TODO: do some sort of reconnect policy if error is
+                    //       connection drop
                     error!("listen_for_messages error: {:#?}", err);
                 }
             };
@@ -84,33 +90,46 @@ impl AccountListener {
 
     async fn listen_for_messages(&mut self) -> Result<AnvilopeEvent> {
         info!("entering idle state");
-        // TODO: use interrupt token to logout from server gracefully
-        let (idle_wait, _interrupt) = self.idle_handle.wait_with_timeout(IDLE_DURATION);
 
-        match idle_wait.await? {
+        let session = self.session_cell.replace(None)
+            .ok_or_else(|| anyhow!("expected active IMAP session, found None"))?;
+        let mut idle_handle = session.idle();
+        idle_handle.init().await?;
+
+        // TODO: use interrupt token to logout from server gracefully
+        let (idle_wait, _interrupt) = idle_handle.wait_with_timeout(IDLE_DURATION);
+
+        let result = match idle_wait.await? {
             IdleResponse::NewData(data) => {
                 if let Response::MailboxData(MailboxDatum::Exists(ordinal)) = data.parsed() {
                     let ord = *ordinal;
                     info!("new message! ord = {}", ord);
-                    return Ok(AnvilopeEvent::AccountNewMessage {
+                    Ok(AnvilopeEvent::AccountNewMessage {
                         account_key: self.account_key.to_owned(),
                         mailbox: "INBOX".to_string(),
                         ord,
-                    });
+                    })
                 } else {
                     // other activity happening in the mailbox, resume idle
                     debug!("other new data received, resuming idle...");
                     let account_key = self.account_key.to_owned();
-                    return Ok(AnvilopeEvent::AccountIdleTimeout { account_key });
+                    Ok(AnvilopeEvent::AccountIdleTimeout { account_key })
                 }
             }
             IdleResponse::ManualInterrupt => {
-                panic!("unexpected manual interrupt!");
+                let account_key = self.account_key.to_owned();
+                Ok(AnvilopeEvent::AccountIdleTimeout { account_key })
             }
             IdleResponse::Timeout => {
                 let account_key = self.account_key.to_owned();
-                return Ok(AnvilopeEvent::AccountIdleTimeout { account_key });
+                Ok(AnvilopeEvent::AccountIdleTimeout { account_key })
             }
         };
+
+        // be polite, always put the session back
+        let session = idle_handle.done().await?;
+        self.session_cell.replace(Some(session));
+
+        result
     }
 }
