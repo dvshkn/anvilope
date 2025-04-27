@@ -20,8 +20,7 @@ use db::{
     Message,
 };
 use llm::Llm;
-use mail::account_listener::AccountListener;
-use mail::message_consumer::MessageConsumer;
+use mail::session::ImapSessionManager;
 
 fn init_config() {
     crate::ANVILOPE_CONFIG.get_or_init(|| AnvilopeConfig::new());
@@ -91,9 +90,9 @@ async fn cli_damprun(_matches: &ArgMatches) -> Result<()> {
     // test configured email accounts
     let (tx, _) = mpsc::channel::<AnvilopeEvent>(4096);
     for acct in &anvilope_config!().accounts {
-        let mut consumer = MessageConsumer::new(&acct, tx.clone()).await?;
+        let consumer = ImapSessionManager::new(&acct, tx.clone()).await?;
         tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-        consumer.session.logout().await?;
+        consumer.logout().await?;
         // TODO: when write-back support implemented check for existence of destination folders/labels here
     }
     info!("can connect to IMAP server(s)");
@@ -126,21 +125,14 @@ async fn cli_serve(_matches: &ArgMatches) -> Result<()> {
 
     let (tx, mut rx) = mpsc::channel::<AnvilopeEvent>(4096);
 
-    let mut key_listener_map: HashMap<&str, Arc<Mutex<AccountListener>>> = HashMap::new();
-    let mut key_consumer_map: HashMap<&str, Mutex<MessageConsumer>> = HashMap::new();
+    let mut key_listener_map: HashMap<&str, Arc<Mutex<ImapSessionManager>>> = HashMap::new();
     for acct in &anvilope_config!().accounts {
         let key = acct._key.as_str();
         let listener = Arc::new(Mutex::new(
-            AccountListener::new(&acct, tx.clone()).await?
+            ImapSessionManager::new(&acct, tx.clone()).await?
         ));
-        let consumer = Mutex::new(
-            MessageConsumer::new(&acct, tx.clone()).await?
-        );
-
         key_listener_map.insert(key, listener.clone());
-        key_consumer_map.insert(key, consumer);
-
-        AccountListener::spawn(listener);
+        ImapSessionManager::spawn_listener(listener);
     }
 
     let llm = Arc::new(
@@ -154,20 +146,13 @@ async fn cli_serve(_matches: &ArgMatches) -> Result<()> {
                     AnvilopeEvent::AccountIdleTimeout { account_key } => {
                         info!("IDLE has timed out! restarting...");
                         let listener = key_listener_map.get(account_key.as_str()).unwrap().clone();
-                        AccountListener::spawn(listener);
+                        ImapSessionManager::spawn_listener(listener);
                     }
                     AnvilopeEvent::AccountNewMessage { account_key, mailbox, ord } => {
                         info!("new message received! {}, {}, {}", account_key, mailbox, ord);
-
-                        // resume idle loop
                         let listener = key_listener_map.get(account_key.as_str()).unwrap().clone();
-                        AccountListener::spawn(listener);
-
-                        // TODO: would be nice to give the downloader its own
-                        //       queue so that we don't have to await on this
-                        //       in the main loop
-                        let consumer = key_consumer_map.get(account_key.as_str()).unwrap();
-                        consumer.lock().await.download_message(mailbox, ord).await;
+                        ImapSessionManager::download_message(listener.clone(), mailbox, ord).await;
+                        ImapSessionManager::spawn_listener(listener);
                     }
                     AnvilopeEvent::MessageDownloaded { message_id } => {
                         info!("message downloaded event");

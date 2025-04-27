@@ -1,5 +1,5 @@
-pub mod account_listener;
-pub mod message_consumer;
+pub mod session;
+pub mod parse;
 
 use anyhow::Result;
 use async_imap::{
@@ -21,7 +21,7 @@ use crate::{
 
 pub type AnvilopeTlsStream = TlsStream<TcpStream>;
 
-pub async fn new_imap_session(account: &Account) -> Result<Session<TlsStream<TcpStream>>> {
+pub async fn connect(account: &Account) -> Result<Session<TlsStream<TcpStream>>> {
     let dns_name = ServerName::try_from(account.host.to_owned())?;
     let host_port = format!("{}:{}", account.host, account.port);
     let connector = TlsConnector::from(anvilope_config!().tls_client_config.clone());

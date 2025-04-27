@@ -8,6 +8,7 @@ use async_imap::extensions::idle::IdleResponse;
 use async_imap::imap_proto::MailboxDatum;
 use async_imap::imap_proto::types::Response;
 use async_imap::types::Capability;
+use futures::TryStreamExt;
 use log::{
     debug,
     error,
@@ -21,21 +22,23 @@ use tokio::sync::mpsc::Sender;
 
 use crate::AnvilopeEvent;
 use crate::config::Account;
+use crate::db::Message;
 
 use super::AnvilopeTlsStream;
+use super::parse;
 
 // TODO: make this configurable because certain firewalls might require a lower
 //       duration to keep connection alive
 const IDLE_DURATION: Duration = Duration::from_secs(20*60);
 
 #[derive(PartialEq)]
-pub enum AccountListenerEvent {
+pub enum ImapSessionManagerEvent {
     Quit,
     Data,
     Timeout,
 }
 
-pub struct AccountListener {
+pub struct ImapSessionManager {
     pub account_key: String,
     // Option type is to handle how async-imap essentially destroys the session
     // object when entering idle state and gives you back a new one when leaving
@@ -44,12 +47,12 @@ pub struct AccountListener {
     pub root_tx: Sender<AnvilopeEvent>,
 }
 
-impl AccountListener {
+impl ImapSessionManager {
     pub async fn new(account: &Account,
-                     root_tx: Sender<AnvilopeEvent>) -> Result<AccountListener> {
+                     root_tx: Sender<AnvilopeEvent>) -> Result<ImapSessionManager> {
         info!("connecting to {}", account.host);
 
-        let mut session = super::new_imap_session(&account).await?;
+        let mut session = super::connect(&account).await?;
 
         let caps = session.capabilities().await?;
         let idle_support = caps.iter().any(|c| {
@@ -68,10 +71,17 @@ impl AccountListener {
         session.select("INBOX").await?;
         let session_cell = Cell::new(Some(session));
 
-        Ok(AccountListener { account_key: account._key.to_owned(), root_tx, session_cell })
+        Ok(ImapSessionManager { account_key: account._key.to_owned(), root_tx, session_cell })
     }
 
-    pub fn spawn(listener_ref: Arc<Mutex<AccountListener>>) -> () {
+    pub async fn logout(&self) -> Result<()> {
+        let mut session = self.session_cell.replace(None)
+            .ok_or_else(|| anyhow!("expected active IMAP session, found None"))?;
+        session.logout().await?;
+        Ok(())
+    }
+
+    pub fn spawn_listener(listener_ref: Arc<Mutex<ImapSessionManager>>) -> () {
         tokio::spawn(async move {
             let mut local_listener = listener_ref.lock().await;
             let result = local_listener.listen_for_messages().await;
@@ -131,5 +141,49 @@ impl AccountListener {
         self.session_cell.replace(Some(session));
 
         result
+    }
+
+    pub async fn download_message(listener_ref: Arc<Mutex<ImapSessionManager>>, mailbox: String, ord: u32) -> () {
+        let mut local_listener = listener_ref.lock().await;
+        let result = local_listener.download_message_inner(mailbox, ord).await;
+        match result {
+            Ok(event) => {
+                local_listener.root_tx.send(event).await.unwrap();
+            }
+            Err(err) => {
+                // TODO: connection error
+                error!("download_message error: {:#?}", err);
+            }
+        }
+    }
+
+    async fn download_message_inner(&mut self, mailbox: String, ord: u32) -> Result<AnvilopeEvent> {
+        let mut session = self.session_cell.replace(None)
+            .ok_or_else(|| anyhow!("expected active IMAP session, found None"))?;
+
+        session.select(mailbox).await?;
+
+        let stream = session.fetch(
+            ord.to_string(),
+            "(UID RFC822.SIZE BODY.PEEK[HEADER] BODY.PEEK[TEXT])",
+        ).await?;
+        let msgs: Vec<_> = stream.try_collect().await?;
+        let msg = msgs.first().expect("no messages!");
+
+        // always put the session back
+        self.session_cell.replace(Some(session));
+
+        let header = msg.header().expect("no header!");
+        let body = msg.text().expect("no body!");
+        let body = std::str::from_utf8(body).expect("body not UTF-8").to_string();
+
+        let mut db_record = parse::parse_header(&self.account_key, &header)?;
+        db_record.body = body;
+        let db_record = Message::create(db_record).await?;
+
+        info!("downloaded message from {} for account {}", db_record.from_address, self.account_key);
+        debug!("wrote message to database id={}", db_record.id);
+
+        Ok(AnvilopeEvent::MessageDownloaded { message_id: db_record.id })
     }
 }
