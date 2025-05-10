@@ -5,7 +5,10 @@ use clap::ArgMatches;
 use clap::Command;
 use config::AnvilopeConfig;
 use env_logger::Env;
-use log::info;
+use log::{
+    info,
+    warn,
+};
 use tokio::signal::ctrl_c;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
@@ -130,6 +133,7 @@ async fn cli_serve(_matches: &ArgMatches) -> Result<()> {
         ImapSessionManager::spawn_listener(listener);
     }
 
+
     let llm = Arc::new(
         Llm::new(tx.clone()).await?
     );
@@ -138,6 +142,22 @@ async fn cli_serve(_matches: &ArgMatches) -> Result<()> {
         tokio::select! {
             event = rx.recv() => {
                 match event.unwrap() {
+                    AnvilopeEvent::AccountDisconnect { account_key } => {
+                        let old_listener = key_listener_map.get(account_key.to_owned().as_str()).unwrap();
+                        if old_listener.lock().await.should_attempt_reconnect() {
+                            info!("account {} disconnected, attempting reconnect...", account_key);
+                            let acct = anvilope_config!().accounts.iter().find(|a| a._key == account_key).unwrap();
+                            let new_listener = Arc::new(Mutex::new(
+                                ImapSessionManager::new(&acct, tx.clone()).await?
+                            ));
+                            key_listener_map.insert(acct._key.as_str(), new_listener);
+                            // NOTE: for now it's the responsibility of the code that sent this event to also queue up
+                            //       another event to give the session manager something to do (ie. listen or download)
+                        } else {
+                            // TODO: decide whether this should be a panic or not
+                            warn!("account {} disconnected! will not attempt reconnect.", account_key);
+                        }
+                    }
                     AnvilopeEvent::AccountIdleTimeout { account_key } => {
                         info!("IDLE has timed out! restarting...");
                         let listener = key_listener_map.get(account_key.as_str()).unwrap().clone();

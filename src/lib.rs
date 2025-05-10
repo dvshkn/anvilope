@@ -28,9 +28,10 @@ macro_rules! checkout_db_conn {
 }
 
 pub enum AnvilopeEvent {
+    AccountDisconnect { account_key: String }, // possibly reconnect
     AccountIdleTimeout { account_key: String }, // restart idle loop
     AccountNewMessage { account_key: String, mailbox: String, ord: u32 }, // send to message consumer
     MessageDownloaded { message_id: i64 }, // send to llm
-    MessageClassified { message_id: i64, class_key: String }, // TODO: apply label to message
+    MessageClassified { message_id: i64, class_key: String }, // apply label to message
     Error,
 }

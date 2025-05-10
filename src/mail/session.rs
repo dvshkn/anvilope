@@ -8,6 +8,10 @@ use async_imap::extensions::idle::IdleResponse;
 use async_imap::imap_proto::MailboxDatum;
 use async_imap::imap_proto::types::Response;
 use async_imap::types::Capability;
+use chrono::{
+    DateTime,
+    Utc,
+};
 use futures::TryStreamExt;
 use log::{
     debug,
@@ -16,6 +20,7 @@ use log::{
 };
 use tokio::sync::Mutex;
 use std::cell::Cell;
+use std::io;
 use std::time::Duration;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
@@ -31,6 +36,10 @@ use super::parse;
 //       duration to keep connection alive
 const IDLE_DURATION: Duration = Duration::from_secs(20*60);
 
+// do not attempt to reconnect unless previous session was able to stay alive
+// for at least this long
+const ATTEMPT_RECONNECT_DURATION: Duration = Duration::from_secs(30*60);
+
 #[derive(PartialEq)]
 pub enum ImapSessionManagerEvent {
     Quit,
@@ -45,6 +54,7 @@ pub struct ImapSessionManager {
     // idle
     pub session_cell: Cell<Option<Session<AnvilopeTlsStream>>>,
     pub root_tx: Sender<AnvilopeEvent>,
+    pub connected_at: DateTime<Utc>,
 }
 
 impl ImapSessionManager {
@@ -70,8 +80,19 @@ impl ImapSessionManager {
         info!("selecting mailbox INBOX");
         session.select("INBOX").await?;
         let session_cell = Cell::new(Some(session));
+        let connected_at = Utc::now();
 
-        Ok(ImapSessionManager { account_key: account._key.to_owned(), root_tx, session_cell })
+        Ok(ImapSessionManager {
+            account_key: account._key.to_owned(),
+            root_tx,
+            session_cell,
+            connected_at
+        })
+    }
+
+    pub fn should_attempt_reconnect(&self) -> bool {
+        let delta = Utc::now() - self.connected_at;
+        delta.to_std().unwrap() > ATTEMPT_RECONNECT_DURATION
     }
 
     pub async fn logout(&self) -> Result<()> {
@@ -90,8 +111,20 @@ impl ImapSessionManager {
                     local_listener.root_tx.send(event).await.unwrap();
                 }
                 Err(err) => {
-                    // TODO: do some sort of reconnect policy if error is
-                    //       connection drop
+                    if let Some(io_err) = err.downcast_ref::<io::Error>() {
+                        if io_err.kind() == io::ErrorKind::UnexpectedEof {
+                            // abrupt disconnect, gmail seems to do this one after 24h
+                            let event = AnvilopeEvent::AccountDisconnect {
+                                account_key: local_listener.account_key.to_owned()
+                            };
+                            local_listener.root_tx.send(event).await.unwrap();
+                            // start the listen loop again
+                            let event = AnvilopeEvent::AccountIdleTimeout {
+                                account_key: local_listener.account_key.to_owned(),
+                            };
+                            local_listener.root_tx.send(event).await.unwrap();
+                        }
+                    }
                     error!("listen_for_messages error: {:#?}", err);
                 }
             };
@@ -145,19 +178,34 @@ impl ImapSessionManager {
 
     pub async fn download_message(listener_ref: Arc<Mutex<ImapSessionManager>>, mailbox: String, ord: u32) -> () {
         let mut local_listener = listener_ref.lock().await;
-        let result = local_listener.download_message_inner(mailbox, ord).await;
+        let result = local_listener.download_message_inner(&mailbox, &ord).await;
         match result {
             Ok(event) => {
                 local_listener.root_tx.send(event).await.unwrap();
             }
             Err(err) => {
-                // TODO: connection error
+                if let Some(io_err) = err.downcast_ref::<io::Error>() {
+                    if io_err.kind() == io::ErrorKind::UnexpectedEof {
+                        // abrupt disconnect, gmail seems to do this one after 24h
+                        let event = AnvilopeEvent::AccountDisconnect {
+                            account_key: local_listener.account_key.to_owned()
+                        };
+                        local_listener.root_tx.send(event).await.unwrap();
+                        // retry the failed message download
+                        let event = AnvilopeEvent::AccountNewMessage {
+                            account_key: local_listener.account_key.to_owned(),
+                            mailbox: mailbox.to_owned(),
+                            ord: ord.to_owned(),
+                        };
+                        local_listener.root_tx.send(event).await.unwrap();
+                    }
+                }
                 error!("download_message error: {:#?}", err);
             }
         }
     }
 
-    async fn download_message_inner(&mut self, mailbox: String, ord: u32) -> Result<AnvilopeEvent> {
+    async fn download_message_inner(&mut self, mailbox: &String, ord: &u32) -> Result<AnvilopeEvent> {
         let mut session = self.session_cell.replace(None)
             .ok_or_else(|| anyhow!("expected active IMAP session, found None"))?;
 
