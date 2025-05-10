@@ -69,12 +69,11 @@ fn message_max_len(inst_template: &String) -> usize {
     let inst_len_tok = inst_len_char / 3;
     result_len_tok -= inst_len_tok;
 
-    // reserve 1024 tokens for LLM response
-    let output_len_tok = MAX_OUTPUT_LEN;
-    result_len_tok -= output_len_tok;
+    // reserve tokens for LLM response
+    result_len_tok -= MAX_OUTPUT_LEN;
 
-    // assume email message will be HTML heavy, use 2.5 char/tok
-    let result_len_char = (result_len_tok as f64 * 2.5).trunc() as usize;
+    // assume email message will be HTML heavy, use 1.5 char/tok
+    let result_len_char = (result_len_tok as f64 * 1.5).trunc() as usize;
 
     result_len_char
 }
