@@ -1,9 +1,6 @@
 use anvilope::*;
 
-use anyhow::{
-    Error,
-    Result,
-};
+use anyhow::Result;
 use clap::ArgMatches;
 use clap::Command;
 use config::AnvilopeConfig;
@@ -19,7 +16,10 @@ use db::{
     LlmJob,
     Message,
 };
-use llm::Llm;
+use llm::{
+    Llm,
+    OllamaGenerateResponse,
+};
 use mail::session::ImapSessionManager;
 
 fn init_config() {
@@ -102,13 +102,8 @@ async fn cli_damprun(_matches: &ArgMatches) -> Result<()> {
     let llm_prompt = "Classify the following message as either spam or not spam: This is a spam message.".to_string();
     info!("sending Ollama test prompt: {}", llm_prompt);
     let llm_raw = llm.ollama_generate(llm_prompt).await?;
-    let llm_json: serde_json::Value = serde_json::from_str(llm_raw.as_str())?;
-    let llm_response = llm_json.as_object()
-        .ok_or(Error::msg("Ollama response not a JSON object"))?
-        .get("response")
-        .ok_or(Error::msg("Ollama response lacks expected JSON property"))?
-        .as_str()
-        .ok_or(Error::msg("Ollama response has unexpected value type"))?;
+    let llm_struct: OllamaGenerateResponse = serde_json::from_str(llm_raw.as_str())?;
+    let llm_response = llm_struct.response;
     info!("Ollama response: {:?}", llm_response);
     info!("can connect to Ollama server");
 

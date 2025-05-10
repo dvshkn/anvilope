@@ -1,3 +1,5 @@
+mod prompt;
+
 use anyhow::{
     Error,
     Result,
@@ -6,10 +8,11 @@ use log::{
     debug,
     error,
     info,
+    warn,
 };
-use minijinja::context;
 use minijinja::Environment;
 use reqwest;
+use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -25,18 +28,6 @@ use crate::AnvilopeEvent;
 
 pub const JOB_STATE_QUEUED: &'static str = "queued";
 pub const JOB_STATE_PROCESSING: &'static str = "processing";
-
-pub const TEMPLATE_EMAIL_MESSAGE: &'static str = r#"
-From: "{{ from_name }}" {{ from_address }}
-Subject: {{ subject }}
-{{ body }}
-"#;
-
-pub const TEMPLATE_CLASSES: &'static str = r#"
-{% for c in classes %}
-{{ c._key }}: {{ c.prompt }}
-{% endfor %}
-"#;
 
 pub const LLM_RESPONSE_FORMAT: &'static str = r#"
 {
@@ -68,9 +59,19 @@ pub struct OllamaGenerateBody {
     pub options: OllamaGenerateOptions,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct OllamaGenerateResponse {
+    pub response: String,
+    pub created_at: String,
+    pub prompt_eval_count: usize,
+    pub eval_count: usize,
+}
+
 #[derive(Debug, Serialize)]
 pub struct OllamaGenerateOptions {
-    pub temperature: f64
+    pub num_ctx: usize,
+    pub num_predict: Option<usize>,
+    pub temperature: f64,
 }
 
 impl Llm {
@@ -81,8 +82,8 @@ impl Llm {
         // assemble prompt templates
         let mut template_env = Environment::new();
         template_env.add_template("classifier", anvilope_config!().classifier.prompt.as_str())?;
-        template_env.add_template("classes", TEMPLATE_CLASSES)?;
-        template_env.add_template("email_message", TEMPLATE_EMAIL_MESSAGE)?;
+        template_env.add_template("classes", prompt::TEMPLATE_CLASSES)?;
+        template_env.add_template("email_message", prompt::TEMPLATE_EMAIL_MESSAGE)?;
 
         // make sure database reflects current configuration
         let (classifier_id, class_key_id_map) = Self::sync_prompts().await?;
@@ -158,11 +159,19 @@ impl Llm {
     }
 
     pub async fn classify(&self, message_id: i64) -> Result<LlmCompletion> {
-        let prompt = self.assemble_prompt(message_id).await?;
+        let message = Message::get(message_id).await?
+            .ok_or(Error::msg("message not found in db"))?;
+        let prompt = prompt::assemble_prompt(
+            &self.template_env,
+            &message.from_address,
+            &message.from_name,
+            &message.subject,
+            &message.body
+        )?;
         let endpoint_response = self.ollama_generate(prompt).await?;
-
-        let endpoint_response_json: Value = serde_json::from_str(endpoint_response.as_str())?;
-        let llm_response = endpoint_response_json["response"].as_str().unwrap_or_else(|| "").to_string();
+        let response: OllamaGenerateResponse = serde_json::from_str(endpoint_response.as_str())?;
+        debug!("{:#?}", response);
+        let llm_response = response.response;
         let classifier_id = Classifier::get_active().await?.unwrap().id;
 
         let mut class_id: Option<i64> = None;
@@ -186,57 +195,42 @@ impl Llm {
             class_key,
         ).await?;
 
+        let ctx_len = anvilope_config!().llm.context_length;
+        if response.prompt_eval_count >= ctx_len {
+            warn!("prompt was likely truncated and will impact LLM results (len={})", response.prompt_eval_count);
+        }
+
         Ok(completion)
-    }
-
-    /// Takes a message_id and returns a full prompt
-    pub async fn assemble_prompt(&self, message_id: i64) -> Result<String> {
-        let message = Message::get(message_id).await?
-            .ok_or(Error::msg("message not found in db"))?;
-        let message_string = self.template_env.get_template("email_message")?
-            .render(context! {
-                from_address => message.from_address,
-                from_name => message.from_name,
-                subject => message.subject,
-                body => message.body,
-            })?;
-        let classes_string = self.template_env.get_template("classes")?
-            .render(context! { classes => anvilope_config!().classes })?;
-        let prompt_string = self.template_env.get_template("classifier")?
-            .render(context! {
-                email_message => message_string.trim(),
-                classes => classes_string.trim(),
-            })?;
-
-        Ok(prompt_string)
     }
 
     /// Actually send request to Ollama server
     pub async fn ollama_generate(&self, prompt: String) -> Result<String> {
         debug!("sending prompt to ollama -- {}", prompt);
+
         let host = anvilope_config!().llm.ollama_host.to_owned();
         let model = anvilope_config!().llm.ollama_model.to_owned();
         let url = format!("{}/api/generate", host);
+        let num_ctx = anvilope_config!().llm.context_length;
+        let num_predict = Some(prompt::MAX_OUTPUT_LEN);
+        let temperature = anvilope_config!().llm.temperature;
+
         let body = OllamaGenerateBody {
             prompt,
             model,
             format: serde_json::from_str(LLM_RESPONSE_FORMAT)?,
-            raw: true,
+            raw: false,
             stream: false,
-            options: OllamaGenerateOptions { temperature: 0.7 },
+            options: OllamaGenerateOptions { num_ctx, num_predict, temperature },
         };
 
         let client = reqwest::Client::new();
         let res = client.post(url)
             .json(&body)
             .send()
-            .await?;
+            .await?
+            .error_for_status()?;
 
-        let res_text = res.text().await?;
-
-        println!("RESPONSE: {}", res_text);
-
-        Ok(res_text)
+        Ok(res.text().await?)
     }
 
     /// Takes the LLM response and attempts to cleanly extract the chosen class.

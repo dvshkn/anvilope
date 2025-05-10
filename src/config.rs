@@ -41,6 +41,12 @@ pub struct AnvilopeConfig {
 pub struct Llm {
     pub ollama_host: String,
     pub ollama_model: String,
+
+    #[serde(default = "Llm::default_context_length")]
+    pub context_length: usize,
+
+    #[serde(default = "Llm::default_temperature")]
+    pub temperature: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -65,6 +71,12 @@ pub struct Class {
     pub _db_id: Option<i64>,
     pub prompt: String,
     pub label: Option<String>,
+}
+
+impl Llm {
+    fn default_context_length() -> usize { 2048 }
+
+    fn default_temperature() -> f64 { 0.7 }
 }
 
 impl Classifier {
@@ -185,7 +197,7 @@ impl AnvilopeConfig {
         let section = root.get("llm")
             .ok_or(anyhow!("required [llm] section not present in config"))?
             .to_owned();
-        let llm = section.try_into()?;
+        let llm: Llm = section.try_into()?;
 
         Ok(llm)
     }
