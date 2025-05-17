@@ -29,7 +29,7 @@ use crate::AnvilopeEvent;
 use crate::config::Account;
 use crate::db::Message;
 
-use super::AnvilopeTlsStream;
+use super::TransportStream;
 use super::parse;
 
 // TODO: make this configurable because certain firewalls might require a lower
@@ -52,7 +52,7 @@ pub struct ImapSessionManager {
     // Option type is to handle how async-imap essentially destroys the session
     // object when entering idle state and gives you back a new one when leaving
     // idle
-    pub session_cell: Cell<Option<Session<AnvilopeTlsStream>>>,
+    pub session_cell: Cell<Option<Session<TransportStream>>>,
     pub root_tx: Sender<AnvilopeEvent>,
     pub connected_at: DateTime<Utc>,
 }
@@ -95,6 +95,11 @@ impl ImapSessionManager {
         delta.to_std().unwrap() > ATTEMPT_RECONNECT_DURATION
     }
 
+    fn disconnect_kind(io_err: &io::Error) -> bool {
+        return io_err.kind() == io::ErrorKind::UnexpectedEof ||
+            io_err.kind() == io::ErrorKind::BrokenPipe;
+    }
+
     pub async fn logout(&self) -> Result<()> {
         let mut session = self.session_cell.replace(None)
             .ok_or_else(|| anyhow!("expected active IMAP session, found None"))?;
@@ -111,8 +116,8 @@ impl ImapSessionManager {
                     local_listener.root_tx.send(event).await.unwrap();
                 }
                 Err(err) => {
-                    if let Some(io_err) = err.downcast_ref::<io::Error>() {
-                        if io_err.kind() == io::ErrorKind::UnexpectedEof {
+                    if let Some(io_err) = err.root_cause().downcast_ref::<io::Error>() {
+                        if Self::disconnect_kind(io_err) {
                             // abrupt disconnect, gmail seems to do this one after 24h
                             let event = AnvilopeEvent::AccountDisconnect {
                                 account_key: local_listener.account_key.to_owned()
@@ -184,8 +189,8 @@ impl ImapSessionManager {
                 local_listener.root_tx.send(event).await.unwrap();
             }
             Err(err) => {
-                if let Some(io_err) = err.downcast_ref::<io::Error>() {
-                    if io_err.kind() == io::ErrorKind::UnexpectedEof {
+                if let Some(io_err) = err.root_cause().downcast_ref::<io::Error>() {
+                    if Self::disconnect_kind(io_err) {
                         // abrupt disconnect, gmail seems to do this one after 24h
                         let event = AnvilopeEvent::AccountDisconnect {
                             account_key: local_listener.account_key.to_owned()

@@ -56,6 +56,9 @@ pub struct Account {
     pub port: u16,
     pub username: String,
     pub password: String,
+
+    #[serde(default = "Account::default_use_tls")]
+    pub use_tls: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,6 +80,10 @@ impl Llm {
     fn default_context_length() -> usize { 2048 }
 
     fn default_temperature() -> f64 { 0.7 }
+}
+
+impl Account {
+    fn default_use_tls() -> bool { true }
 }
 
 impl Classifier {
