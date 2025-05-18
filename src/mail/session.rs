@@ -36,9 +36,8 @@ use super::parse;
 //       duration to keep connection alive
 const IDLE_DURATION: Duration = Duration::from_secs(20*60);
 
-// do not attempt to reconnect unless previous session was able to stay alive
-// for at least this long
-const ATTEMPT_RECONNECT_DURATION: Duration = Duration::from_secs(30*60);
+const BACKOFF_BASE_SECS: f32 = 30.0;
+const MAX_BACKOFF: f32 = 4.0;
 
 #[derive(PartialEq)]
 pub enum ImapSessionManagerEvent {
@@ -55,14 +54,33 @@ pub struct ImapSessionManager {
     pub session_cell: Cell<Option<Session<TransportStream>>>,
     pub root_tx: Sender<AnvilopeEvent>,
     pub connected_at: DateTime<Utc>,
+    pub healthy_at: DateTime<Utc>,
+    pub backoff_count: f32,
 }
 
 impl ImapSessionManager {
     pub async fn new(account: &Account,
-                     root_tx: Sender<AnvilopeEvent>) -> Result<ImapSessionManager> {
+                     root_tx: Sender<AnvilopeEvent>,
+                     backoff_count: f32) -> Result<ImapSessionManager> {
         info!("connecting to {}", account.host);
 
-        let mut session = super::connect(&account).await?;
+        let connected_at = Utc::now();
+        let healthy_at = connected_at + Duration::from_secs_f32(BACKOFF_BASE_SECS * backoff_count.exp2());
+
+        let mut session = match super::connect(&account).await {
+            Ok(session) => session,
+            Err(err) => {
+                error!("new() error: {:#?}", err);
+                Self::spawn_reconnect_handler(
+                    &err,
+                    account._key.to_owned(),
+                    healthy_at,
+                    backoff_count,
+                    root_tx.clone(),
+                );
+                return Err(err);
+            }
+        };
 
         let caps = session.capabilities().await?;
         let idle_support = caps.iter().any(|c| {
@@ -80,24 +98,15 @@ impl ImapSessionManager {
         info!("selecting mailbox INBOX");
         session.select("INBOX").await?;
         let session_cell = Cell::new(Some(session));
-        let connected_at = Utc::now();
 
         Ok(ImapSessionManager {
             account_key: account._key.to_owned(),
             root_tx,
             session_cell,
-            connected_at
+            connected_at,
+            healthy_at,
+            backoff_count,
         })
-    }
-
-    pub fn should_attempt_reconnect(&self) -> bool {
-        let delta = Utc::now() - self.connected_at;
-        delta.to_std().unwrap() > ATTEMPT_RECONNECT_DURATION
-    }
-
-    fn disconnect_kind(io_err: &io::Error) -> bool {
-        return io_err.kind() == io::ErrorKind::UnexpectedEof ||
-            io_err.kind() == io::ErrorKind::BrokenPipe;
     }
 
     pub async fn logout(&self) -> Result<()> {
@@ -105,6 +114,49 @@ impl ImapSessionManager {
             .ok_or_else(|| anyhow!("expected active IMAP session, found None"))?;
         session.logout().await?;
         Ok(())
+    }
+
+    fn spawn_reconnect_handler(
+        err: &Error,
+        account_key: String,
+        healthy_at: DateTime<Utc>,
+        backoff_count: f32,
+        root_tx: Sender<AnvilopeEvent>
+    ) -> () {
+        let mut do_reconnect = false;
+        if let Some(io_err) = err.root_cause().downcast_ref::<io::Error>() {
+            if io_err.kind() == io::ErrorKind::UnexpectedEof || io_err.kind() == io::ErrorKind::BrokenPipe || io_err.kind() == io::ErrorKind::ConnectionRefused {
+                do_reconnect = true;
+            }
+        }
+        if do_reconnect {
+            tokio::spawn(async move {
+                let mut new_backoff = backoff_count;
+                let mut backoff_secs = BACKOFF_BASE_SECS * backoff_count.exp2();
+                if Utc::now() < healthy_at {
+                    new_backoff += 1.0;
+                    debug!("new backoff value {} for {}", new_backoff, account_key);
+                } else {
+                    new_backoff = 0.0;
+                    backoff_secs = 0.0;
+                    debug!("connection was healthy, backoff value reset for {}", account_key);
+                }
+
+                if new_backoff <= MAX_BACKOFF {
+                    debug!("sleeping for {}", backoff_secs);
+                    tokio::time::sleep(Duration::from_secs_f32(backoff_secs)).await;
+
+                    // signal to recreate ImapSessionManager
+                    let event = AnvilopeEvent::AccountDisconnect {
+                        account_key: account_key.to_owned(),
+                        backoff_count: new_backoff,
+                    };
+                    root_tx.send(event).await.unwrap();
+                } else {
+                    error!("max unhealthy reconnects exceeded for account {}, will not reconnect again", account_key);
+                }
+            });
+        }
     }
 
     pub fn spawn_listener(listener_ref: Arc<Mutex<ImapSessionManager>>) -> () {
@@ -116,21 +168,14 @@ impl ImapSessionManager {
                     local_listener.root_tx.send(event).await.unwrap();
                 }
                 Err(err) => {
-                    if let Some(io_err) = err.root_cause().downcast_ref::<io::Error>() {
-                        if Self::disconnect_kind(io_err) {
-                            // abrupt disconnect, gmail seems to do this one after 24h
-                            let event = AnvilopeEvent::AccountDisconnect {
-                                account_key: local_listener.account_key.to_owned()
-                            };
-                            local_listener.root_tx.send(event).await.unwrap();
-                            // start the listen loop again
-                            let event = AnvilopeEvent::AccountIdleTimeout {
-                                account_key: local_listener.account_key.to_owned(),
-                            };
-                            local_listener.root_tx.send(event).await.unwrap();
-                        }
-                    }
-                    error!("listen_for_messages error: {:#?}", err);
+                    error!("listen_for_messages() error: {:#?}", err);
+                    Self::spawn_reconnect_handler(
+                        &err,
+                        local_listener.account_key.to_owned(),
+                        local_listener.healthy_at,
+                        local_listener.backoff_count,
+                        local_listener.root_tx.clone(),
+                    );
                 }
             };
         });
@@ -189,23 +234,15 @@ impl ImapSessionManager {
                 local_listener.root_tx.send(event).await.unwrap();
             }
             Err(err) => {
-                if let Some(io_err) = err.root_cause().downcast_ref::<io::Error>() {
-                    if Self::disconnect_kind(io_err) {
-                        // abrupt disconnect, gmail seems to do this one after 24h
-                        let event = AnvilopeEvent::AccountDisconnect {
-                            account_key: local_listener.account_key.to_owned()
-                        };
-                        local_listener.root_tx.send(event).await.unwrap();
-                        // retry the failed message download
-                        let event = AnvilopeEvent::AccountNewMessage {
-                            account_key: local_listener.account_key.to_owned(),
-                            mailbox: mailbox.to_owned(),
-                            ord: ord.to_owned(),
-                        };
-                        local_listener.root_tx.send(event).await.unwrap();
-                    }
-                }
-                error!("download_message error: {:#?}", err);
+                // TODO: message likely not downloaded, should be retried
+                error!("download_message() error: {:#?}", err);
+                Self::spawn_reconnect_handler(
+                    &err,
+                    local_listener.account_key.to_owned(),
+                    local_listener.healthy_at,
+                    local_listener.backoff_count,
+                    local_listener.root_tx.clone(),
+                );
             }
         }
     }

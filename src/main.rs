@@ -5,10 +5,7 @@ use clap::ArgMatches;
 use clap::Command;
 use config::AnvilopeConfig;
 use env_logger::Env;
-use log::{
-    info,
-    warn,
-};
+use log::info;
 use tokio::signal::ctrl_c;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
@@ -93,7 +90,7 @@ async fn cli_damprun(_matches: &ArgMatches) -> Result<()> {
     // test configured email accounts
     let (tx, _) = mpsc::channel::<AnvilopeEvent>(4096);
     for acct in &anvilope_config!().accounts {
-        let consumer = ImapSessionManager::new(&acct, tx.clone()).await?;
+        let consumer = ImapSessionManager::new(&acct, tx.clone(), 0.0).await?;
         tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
         consumer.logout().await?;
         // TODO: when write-back support implemented check for existence of destination folders/labels here
@@ -126,13 +123,12 @@ async fn cli_serve(_matches: &ArgMatches) -> Result<()> {
     let mut key_listener_map: HashMap<&str, Arc<Mutex<ImapSessionManager>>> = HashMap::new();
     for acct in &anvilope_config!().accounts {
         let key = acct._key.as_str();
-        let listener = Arc::new(Mutex::new(
-            ImapSessionManager::new(&acct, tx.clone()).await?
-        ));
-        key_listener_map.insert(key, listener.clone());
-        ImapSessionManager::spawn_listener(listener);
+        if let Ok(listener) = ImapSessionManager::new(&acct, tx.clone(), 0.0).await {
+            let listener_ref = Arc::new(Mutex::new(listener));
+            key_listener_map.insert(key, listener_ref.clone());
+            ImapSessionManager::spawn_listener(listener_ref);
+        }
     }
-
 
     let llm = Arc::new(
         Llm::new(tx.clone()).await?
@@ -142,20 +138,13 @@ async fn cli_serve(_matches: &ArgMatches) -> Result<()> {
         tokio::select! {
             event = rx.recv() => {
                 match event.unwrap() {
-                    AnvilopeEvent::AccountDisconnect { account_key } => {
-                        let old_listener = key_listener_map.get(account_key.to_owned().as_str()).unwrap();
-                        if old_listener.lock().await.should_attempt_reconnect() {
-                            info!("account {} disconnected, attempting reconnect...", account_key);
-                            let acct = anvilope_config!().accounts.iter().find(|a| a._key == account_key).unwrap();
-                            let new_listener = Arc::new(Mutex::new(
-                                ImapSessionManager::new(&acct, tx.clone()).await?
-                            ));
-                            key_listener_map.insert(acct._key.as_str(), new_listener);
-                            // NOTE: for now it's the responsibility of the code that sent this event to also queue up
-                            //       another event to give the session manager something to do (ie. listen or download)
-                        } else {
-                            // TODO: decide whether this should be a panic or not
-                            warn!("account {} disconnected! will not attempt reconnect.", account_key);
+                    AnvilopeEvent::AccountDisconnect { account_key, backoff_count } => {
+                        info!("account {} disconnected, attempting reconnect...", account_key);
+                        let acct = anvilope_config!().accounts.iter().find(|a| a._key == account_key).unwrap();
+                        if let Ok(new_listener) = ImapSessionManager::new(&acct, tx.clone(), backoff_count).await {
+                            let new_listener_ref = Arc::new(Mutex::new(new_listener));
+                            key_listener_map.insert(acct._key.as_str(), new_listener_ref.clone());
+                            ImapSessionManager::spawn_listener(new_listener_ref);
                         }
                     }
                     AnvilopeEvent::AccountIdleTimeout { account_key } => {
