@@ -1,0 +1,2 @@
+[alias]
+test-unit = "test --lib --bins"
