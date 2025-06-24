@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.97"
 async-imap = { version = "0.10.4", features = ["runtime-tokio"], default-features = false }
+base64 = "0.22.1"
 chrono = "0.4.40"
 clap = "4.5.36"
 crossbeam = { version = "0.8.4", features = ["crossbeam-channel", "crossbeam-deque", "crossbeam-epoch", "crossbeam-queue"] }
@@ -16,6 +17,7 @@ futures = "0.3.31"
 home = "0.5.11"
 log = "0.4.27"
 minijinja = { version = "2.9.0", features = ["loader"] }
+quoted_printable = "0.5.1"
 r2d2 = "0.8.10"
 r2d2_sqlite = "0.27.0"
 regex = "1.11.1"

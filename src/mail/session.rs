@@ -5,8 +5,10 @@ use anyhow::{
 };
 use async_imap::Session;
 use async_imap::extensions::idle::IdleResponse;
-use async_imap::imap_proto::MailboxDatum;
-use async_imap::imap_proto::types::Response;
+use async_imap::imap_proto::{
+    MailboxDatum,
+    Response,
+};
 use async_imap::types::Capability;
 use chrono::{
     DateTime,
@@ -17,6 +19,7 @@ use log::{
     debug,
     error,
     info,
+    warn,
 };
 use tokio::sync::Mutex;
 use std::cell::Cell;
@@ -28,6 +31,7 @@ use tokio::sync::mpsc::Sender;
 use crate::AnvilopeEvent;
 use crate::config::Account;
 use crate::db::Message;
+use crate::mail::parse::TextPartMimeType;
 
 use super::TransportStream;
 use super::parse;
@@ -247,25 +251,50 @@ impl ImapSessionManager {
         }
     }
 
+    // TODO: add uid column to message table
+
     async fn download_message_inner(&mut self, mailbox: &String, ord: &u32) -> Result<AnvilopeEvent> {
         let mut session = self.session_cell.replace(None)
             .ok_or_else(|| anyhow!("expected active IMAP session, found None"))?;
 
         session.select(mailbox).await?;
 
-        let stream = session.fetch(
+        let res = session.fetch(
             ord.to_string(),
-            "(UID RFC822.SIZE BODY.PEEK[HEADER] BODY.PEEK[TEXT])",
+            "(UID BODYSTRUCTURE BODY.PEEK[HEADER])",
         ).await?;
-        let msgs: Vec<_> = stream.try_collect().await?;
-        let msg = msgs.first().expect("no messages!");
+        let res: Vec<_> = res.try_collect().await?;
+        let res = res.first().expect("cannot fetch metadata!");
+        let uid = res.uid.unwrap();
+        let bodystruct = res.bodystructure().expect("cannot read bodystructure!");
+        let header = res.header().expect("cannot read header!");
+        let parts = parse::find_text_parts(bodystruct);
+
+        // prefer first text/html part, typically at first level of the email
+        let mut maybe_part = parts.iter().find(|tp| tp.mime_subtype == TextPartMimeType::Html);
+        if maybe_part.is_none() {
+            // fallback to text/plain
+            maybe_part = parts.iter().find(|tp| tp.mime_subtype == TextPartMimeType::Plain);
+        }
+        let mut body = "".to_string();
+        if let Some(part) = maybe_part {
+            let section_path = part.to_section_path();
+            let path_string = part.to_string();
+            debug!("selecting part={}, type={:#?}, encoding={:#?}", path_string, part.mime_subtype, part.encoding);
+            let res: Vec<_> = session.uid_fetch(uid.to_string(), format!("BODY.PEEK[{}]", path_string))
+                .await?
+                .try_collect()
+                .await?;
+            if res.len() > 0 {
+                let bytes: &[u8] = res.first().unwrap().section(&section_path).expect("expected body not found!");
+                body = parse::decode_utf8(bytes, &part.encoding).expect("could not decode UTF-8");
+            }
+        } else {
+            warn!("could not find suitable body content in email");
+        }
 
         // always put the session back
         self.session_cell.replace(Some(session));
-
-        let header = msg.header().expect("no header!");
-        let body = msg.text().expect("no body!");
-        let body = std::str::from_utf8(body).expect("body not UTF-8").to_string();
 
         let mut db_record = parse::parse_header(&self.account_key, &header)?;
         db_record.body = body;
