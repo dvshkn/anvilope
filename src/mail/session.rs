@@ -129,7 +129,7 @@ impl ImapSessionManager {
     ) -> () {
         let mut do_reconnect = false;
         if let Some(io_err) = err.root_cause().downcast_ref::<io::Error>() {
-            if io_err.kind() == io::ErrorKind::UnexpectedEof || io_err.kind() == io::ErrorKind::BrokenPipe || io_err.kind() == io::ErrorKind::ConnectionRefused {
+            if io_err.kind() == io::ErrorKind::UnexpectedEof || io_err.kind() == io::ErrorKind::BrokenPipe || io_err.kind() == io::ErrorKind::ConnectionRefused || io_err.kind() == io::ErrorKind::ConnectionReset {
                 do_reconnect = true;
             }
         }
