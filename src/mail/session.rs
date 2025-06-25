@@ -270,11 +270,11 @@ impl ImapSessionManager {
         let header = res.header().expect("cannot read header!");
         let parts = parse::find_text_parts(bodystruct);
 
-        // prefer first text/html part, typically at first level of the email
-        let mut maybe_part = parts.iter().find(|tp| tp.mime_subtype == TextPartMimeType::Html);
+        // prefer first text/plain part, typically at first level of the email
+        let mut maybe_part = parts.iter().find(|tp| tp.mime_subtype == TextPartMimeType::Plain);
         if maybe_part.is_none() {
-            // fallback to text/plain
-            maybe_part = parts.iter().find(|tp| tp.mime_subtype == TextPartMimeType::Plain);
+            // fallback to text/html
+            maybe_part = parts.iter().find(|tp| tp.mime_subtype == TextPartMimeType::Html);
         }
         let mut body = "".to_string();
         if let Some(part) = maybe_part {
