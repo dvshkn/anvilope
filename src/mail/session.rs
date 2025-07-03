@@ -286,8 +286,15 @@ impl ImapSessionManager {
                 .try_collect()
                 .await?;
             if res.len() > 0 {
-                let bytes: &[u8] = res.first().unwrap().section(&section_path).expect("expected body not found!");
-                body = parse::decode_utf8(bytes, &part.encoding).expect("could not decode UTF-8");
+                if let Some(bytes) = res.first().unwrap().section(&section_path) {
+                    if let Some(decoded) = parse::decode_utf8(bytes, &part.encoding) {
+                        body = decoded;
+                    } else {
+                        warn!("could not decode body into UTF-8");
+                    }
+                } else {
+                    warn!("could not find expected body section");
+                }
             }
         } else {
             warn!("could not find suitable body content in email");
