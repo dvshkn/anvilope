@@ -251,8 +251,6 @@ impl ImapSessionManager {
         }
     }
 
-    // TODO: add uid column to message table
-
     async fn download_message_inner(&mut self, mailbox: &String, ord: &u32) -> Result<AnvilopeEvent> {
         let mut session = self.session_cell.replace(None)
             .ok_or_else(|| anyhow!("expected active IMAP session, found None"))?;
@@ -321,10 +319,21 @@ impl ImapSessionManager {
             warn!("no text/plain or text/html parts found in message");
         }
 
+        // TODO: can probably find a way to cache this safely
+        let mailbox_status = session.status(mailbox, "(UIDVALIDITY)").await?;
+        let uid_validity = if let Some(uv) = mailbox_status.uid_validity {
+            uv
+        } else {
+            error!("server did not return UIDVALIDITY value");
+            0
+        };
+
         // always put the session back
         self.session_cell.replace(Some(session));
 
         let mut db_record = parse::parse_header(&self.account_key, &header)?;
+        db_record.uid = uid;
+        db_record.uid_validity = uid_validity;
         db_record.body_plain = body_plain;
         db_record.body_html = body_html;
         let db_record = Message::create(db_record).await?;

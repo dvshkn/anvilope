@@ -22,6 +22,8 @@ pub struct Message {
     pub subject: String,
     pub body_plain: String,
     pub body_html: String,
+    pub uid: u32,
+    pub uid_validity: u32,
     pub created_at: i64,
 }
 
@@ -35,6 +37,8 @@ impl DbTable for Message {
         subject TEXT NOT NULL,
         body_plain TEXT NOT NULL,
         body_html TEXT NOT NULL,
+        uid INTEGER NOT NULL,
+        uid_validity INTEGER NOT NULL,
         created_at INTEGER DEFAULT(unixepoch('subsec') * 1000) NOT NULL
     );
     CREATE INDEX idx_account_key ON message(account_key);
@@ -52,6 +56,8 @@ impl From<&Row<'_>> for Message {
             subject: r.get("subject").unwrap(),
             body_plain: r.get("body_plain").unwrap(),
             body_html: r.get("body_html").unwrap(),
+            uid: r.get("uid").unwrap(),
+            uid_validity: r.get("uid_validity").unwrap(),
             created_at: r.get("created_at").unwrap(),
         }
     }
@@ -63,9 +69,10 @@ impl Message {
             let conn = checkout_db_conn!();
             let res = super::exec_return_int2(&conn,
                 "INSERT INTO message (account_key, class_key, from_address,
-                from_name, subject, body_plain, body_html) VALUES (:account_key,
-                :class_key, :from_address, :from_name, :subject, :body_plain,
-                :body_html) RETURNING id, created_at",
+                from_name, subject, body_plain, body_html, uid, uid_validity)
+                VALUES (:account_key, :class_key, :from_address, :from_name,
+                :subject, :body_plain, :body_html, :uid, :uid_validity)
+                RETURNING id, created_at",
                 named_params! {
                     ":account_key": msg.account_key,
                     ":class_key": msg.class_key,
@@ -74,6 +81,8 @@ impl Message {
                     ":subject": msg.subject,
                     ":body_plain": msg.body_plain,
                     ":body_html": msg.body_html,
+                    ":uid": msg.uid,
+                    ":uid_validity": msg.uid_validity,
                 }
             );
             match res {
@@ -92,7 +101,7 @@ impl Message {
             let conn = checkout_db_conn!();
             super::exec_return_first(&conn,
                 "SELECT id, account_key, class_key, from_address, from_name,
-                subject, body_plain, body_html, created_at
+                subject, body_plain, body_html, uid, uid_validity, created_at
                 FROM message WHERE id = ?",
                 [&id],
             )
@@ -104,7 +113,7 @@ impl Message {
             let conn = checkout_db_conn!();
             super::exec_return_vec(&conn,
                 "SELECT id, account_key, class_key, from_address, from_name,
-                subject, body_plain, body_html, created_at
+                subject, body_plain, body_html, uid, uid_validity, created_at
                 FROM message WHERE class_key = ?",
                 [&class_key])
         }).await?

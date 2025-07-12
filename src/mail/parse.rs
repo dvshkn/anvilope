@@ -116,6 +116,8 @@ pub fn parse_header(account_key: &String, bytes: &[u8]) -> Result<Message> {
         subject,
         body_plain: "".to_string(),
         body_html: "".to_string(),
+        uid: 0,
+        uid_validity: 0,
         created_at: date,
     })
 }
