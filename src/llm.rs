@@ -161,12 +161,20 @@ impl Llm {
     pub async fn classify(&self, message_id: i64) -> Result<LlmCompletion> {
         let message = Message::get(message_id).await?
             .ok_or(Error::msg("message not found in db"))?;
+
+        // TODO: add config flag to prefer HTML
+        let body = if message.body_plain.len() > 0 || message.body_html.len() == 0 {
+            message.body_plain
+        } else {
+            message.body_html
+        };
+
         let prompt = prompt::assemble_prompt(
             &self.template_env,
             &message.from_address,
             &message.from_name,
             &message.subject,
-            &message.body
+            &body,
         )?;
         let endpoint_response = self.ollama_generate(prompt).await?;
         let response: OllamaGenerateResponse = serde_json::from_str(endpoint_response.as_str())?;

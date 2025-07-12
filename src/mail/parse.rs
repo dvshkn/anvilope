@@ -114,7 +114,8 @@ pub fn parse_header(account_key: &String, bytes: &[u8]) -> Result<Message> {
         from_address,
         from_name,
         subject,
-        body: "".to_string(),
+        body_plain: "".to_string(),
+        body_html: "".to_string(),
         created_at: date,
     })
 }

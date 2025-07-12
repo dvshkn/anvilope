@@ -270,17 +270,12 @@ impl ImapSessionManager {
         let header = res.header().expect("cannot read header!");
         let parts = parse::find_text_parts(bodystruct);
 
-        // prefer first text/plain part, typically at first level of the email
-        let mut maybe_part = parts.iter().find(|tp| tp.mime_subtype == TextPartMimeType::Plain);
-        if maybe_part.is_none() {
-            // fallback to text/html
-            maybe_part = parts.iter().find(|tp| tp.mime_subtype == TextPartMimeType::Html);
-        }
-        let mut body = "".to_string();
-        if let Some(part) = maybe_part {
+        // attempt fetch text/plain
+        let mut body_plain = "".to_string();
+        if let Some(part) = parts.iter().find(|tp| tp.mime_subtype == TextPartMimeType::Plain) {
             let section_path = part.to_section_path();
             let path_string = part.to_string();
-            debug!("selecting part={}, type={:#?}, encoding={:#?}", path_string, part.mime_subtype, part.encoding);
+            debug!("found text/plain, part={}, type={:#?}, encoding={:#?}", path_string, part.mime_subtype, part.encoding);
             let res: Vec<_> = session.uid_fetch(uid.to_string(), format!("BODY.PEEK[{}]", path_string))
                 .await?
                 .try_collect()
@@ -288,23 +283,50 @@ impl ImapSessionManager {
             if res.len() > 0 {
                 if let Some(bytes) = res.first().unwrap().section(&section_path) {
                     if let Some(decoded) = parse::decode_utf8(bytes, &part.encoding) {
-                        body = decoded;
+                        body_plain = decoded;
                     } else {
-                        warn!("could not decode body into UTF-8");
+                        warn!("could not decode text/plain part into UTF-8");
                     }
                 } else {
-                    warn!("could not find expected body section");
+                    warn!("could not download expected text/plain part");
                 }
             }
-        } else {
-            warn!("could not find suitable body content in email");
+        }
+
+        // attempt fetch text/html
+        let mut body_html = "".to_string();
+        if let Some(part) = parts.iter().find(|tp| tp.mime_subtype == TextPartMimeType::Html) {
+            let section_path = part.to_section_path();
+            let path_string = part.to_string();
+            debug!("found text/html, part={}, type={:#?}, encoding={:#?}", path_string, part.mime_subtype, part.encoding);
+            let res: Vec<_> = session.uid_fetch(uid.to_string(), format!("BODY.PEEK[{}]", path_string))
+                .await?
+                .try_collect()
+                .await?;
+            if res.len() > 0 {
+                if let Some(bytes) = res.first().unwrap().section(&section_path) {
+                    if let Some(decoded) = parse::decode_utf8(bytes, &part.encoding) {
+                        body_html = decoded;
+                    } else {
+                        warn!("could not decode text/html part into UTF-8");
+                    }
+                } else {
+                    warn!("could not download expected text/html part");
+                }
+            }
+
+        }
+
+        if body_plain.len() == 0 && body_html.len() == 0 {
+            warn!("no text/plain or text/html parts found in message");
         }
 
         // always put the session back
         self.session_cell.replace(Some(session));
 
         let mut db_record = parse::parse_header(&self.account_key, &header)?;
-        db_record.body = body;
+        db_record.body_plain = body_plain;
+        db_record.body_html = body_html;
         let db_record = Message::create(db_record).await?;
 
         info!("downloaded message from {} for account {}", db_record.from_address, self.account_key);
