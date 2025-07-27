@@ -14,6 +14,7 @@ use serde::{
     Deserialize,
     Serialize,
 };
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::prelude::Read;
 use std::path::PathBuf;
@@ -73,7 +74,7 @@ pub struct Class {
     pub _key: String,
     pub _db_id: Option<i64>,
     pub prompt: String,
-    pub label: Option<String>,
+    pub labels: HashMap<String, String>,
 }
 
 impl Llm {
@@ -123,7 +124,7 @@ impl AnvilopeConfig {
             .expect("cannot parse [accounts] section of config");
         let mut classifier = Self::parse_classifier_section(&root_config)
             .expect("cannot parse [classifier] section of config");
-        let mut classes = Self::parse_classes_section(&root_config)
+        let mut classes = Self::parse_classes_section(&root_config, &accounts)
             .expect("cannot parse [classes] section of config");
 
         // some hygiene
@@ -240,21 +241,40 @@ impl AnvilopeConfig {
         Ok(classifier)
     }
 
-    fn parse_classes_section(root: &Map<String, Value>) -> Result<Vec<Class>> {
+    fn parse_classes_section(root: &Map<String, Value>, accounts: &Vec<Account>) -> Result<Vec<Class>> {
         let section = root.get("classes")
             .ok_or(anyhow!("required [classes] section is missing"))?;
         let keys = section.as_table()
             .ok_or(anyhow!("required [classes] section is malformed"))?
             .keys();
+
         let mut classes: Vec<Class> = Vec::new();
         for k in keys {
-            let mut class_map = section[k].as_table()
+            let class_map = section[k].as_table()
                 .ok_or(anyhow!("malformed class entry: {}", k))?
                 .to_owned();
-            // Retain the user-provided key
-            class_map.insert("_key".to_string(), Value::String(k.to_owned()));
-            let class = class_map.try_into()?;
-            classes.push(class);
+
+            let _key = k.to_owned();
+            let prompt = class_map.get("prompt").unwrap().as_str().unwrap().to_string();
+            let mut labels: HashMap<String, String> = HashMap::new();
+
+            // labels are optional, default to account key string
+            for acct in accounts {
+                labels.insert(acct._key.to_owned(), acct._key.to_owned());
+            }
+            if let Some(src_labels_value) = class_map.get("labels") {
+                let src_labels_map = src_labels_value.as_table().unwrap();
+                for (k, v) in src_labels_map.iter() {
+                    labels.insert(k.to_owned(), v.as_str().unwrap().to_owned());
+                }
+            }
+
+            classes.push(Class {
+                _key,
+                _db_id: None,
+                prompt,
+                labels,
+            });
         }
 
         Ok(classes)

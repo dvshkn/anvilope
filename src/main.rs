@@ -5,10 +5,12 @@ use clap::ArgMatches;
 use clap::Command;
 use config::AnvilopeConfig;
 use env_logger::Env;
-use log::info;
+use log::{
+    debug,
+    info,
+};
 use tokio::signal::ctrl_c;
 use tokio::sync::mpsc;
-use tokio::sync::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -120,11 +122,11 @@ async fn cli_serve(_matches: &ArgMatches) -> Result<()> {
 
     let (tx, mut rx) = mpsc::channel::<AnvilopeEvent>(4096);
 
-    let mut key_listener_map: HashMap<&str, Arc<Mutex<ImapSessionManager>>> = HashMap::new();
+    let mut key_listener_map: HashMap<&str, Arc<ImapSessionManager>> = HashMap::new();
     for acct in &anvilope_config!().accounts {
         let key = acct._key.as_str();
         if let Ok(listener) = ImapSessionManager::new(&acct, tx.clone(), 0.0).await {
-            let listener_ref = Arc::new(Mutex::new(listener));
+            let listener_ref = Arc::new(listener);
             key_listener_map.insert(key, listener_ref.clone());
             ImapSessionManager::spawn_listener(listener_ref);
         }
@@ -142,7 +144,7 @@ async fn cli_serve(_matches: &ArgMatches) -> Result<()> {
                         info!("account {} disconnected, attempting reconnect...", account_key);
                         let acct = anvilope_config!().accounts.iter().find(|a| a._key == account_key).unwrap();
                         if let Ok(new_listener) = ImapSessionManager::new(&acct, tx.clone(), backoff_count).await {
-                            let new_listener_ref = Arc::new(Mutex::new(new_listener));
+                            let new_listener_ref = Arc::new(new_listener);
                             key_listener_map.insert(acct._key.as_str(), new_listener_ref.clone());
                             ImapSessionManager::spawn_listener(new_listener_ref);
                         }
@@ -167,7 +169,19 @@ async fn cli_serve(_matches: &ArgMatches) -> Result<()> {
                     AnvilopeEvent::MessageClassified { message_id, class_key } => {
                         info!("message classified event");
                         info!("updating class of message_id={} to \"{}\"", message_id, class_key);
-                        Message::set_class(message_id, class_key).await?;
+                        let message = Message::set_class(message_id, &class_key).await?.unwrap();
+                        let account_key = message.account_key;
+                        let listener = key_listener_map.get(account_key.as_str()).unwrap().clone();
+                        let mailbox = "INBOX".to_string(); // TODO
+                        ImapSessionManager::spawn_interrupt_copy_message(
+                            listener,
+                            mailbox,
+                            message.uid,
+                            class_key,
+                        );
+                    }
+                    AnvilopeEvent::Noop { account_key } => {
+                        debug!("no-op event {}", account_key);
                     }
                     _ => {
                         println!("not yet");

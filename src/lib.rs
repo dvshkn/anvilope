@@ -33,5 +33,6 @@ pub enum AnvilopeEvent {
     AccountNewMessage { account_key: String, mailbox: String, ord: u32 }, // send to message consumer
     MessageDownloaded { message_id: i64 }, // send to llm
     MessageClassified { message_id: i64, class_key: String }, // apply label to message
+    Noop { account_key: String },
     Error,
 }

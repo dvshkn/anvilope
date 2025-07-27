@@ -100,33 +100,30 @@ impl Message {
         tokio::task::spawn_blocking(move || {
             let conn = checkout_db_conn!();
             super::exec_return_first(&conn,
-                "SELECT id, account_key, class_key, from_address, from_name,
-                subject, body_plain, body_html, uid, uid_validity, created_at
-                FROM message WHERE id = ?",
+                "SELECT * FROM message WHERE id = ?",
                 [&id],
             )
         }).await?
     }
 
-    pub async fn get_by_class(class_key: String) -> Result<Vec<Message>> {
+    pub async fn get_by_class(class_key: &String) -> Result<Vec<Message>> {
+        let owned_class_key = class_key.to_owned();
         tokio::task::spawn_blocking(move || {
             let conn = checkout_db_conn!();
             super::exec_return_vec(&conn,
-                "SELECT id, account_key, class_key, from_address, from_name,
-                subject, body_plain, body_html, uid, uid_validity, created_at
-                FROM message WHERE class_key = ?",
-                [&class_key])
+                "SELECT * FROM message WHERE class_key = ?",
+                [&owned_class_key])
         }).await?
     }
 
-    pub async fn set_class(id: i64, class_key: String) -> Result<()> {
+    pub async fn set_class(id: i64, class_key: &String) -> Result<Option<Message>> {
+        let owned_class_key = class_key.to_owned();
         tokio::task::spawn_blocking(move || {
             let conn = checkout_db_conn!();
-            conn.execute(
-                "UPDATE message SET class_key = ? WHERE id = ?",
-                (&class_key, &id)
-            )?;
-            Ok(())
+            super::exec_return_first(&conn,
+                "UPDATE message SET class_key = ? WHERE id = ? RETURNING *",
+                (&owned_class_key, &id)
+            )
         }).await?
     }
 }

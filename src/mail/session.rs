@@ -1,5 +1,4 @@
 use anyhow::{
-    anyhow,
     Error,
     Result,
 };
@@ -14,7 +13,7 @@ use chrono::{
     DateTime,
     Utc,
 };
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use log::{
     debug,
     error,
@@ -26,9 +25,10 @@ use std::cell::Cell;
 use std::io;
 use std::time::Duration;
 use std::sync::Arc;
+use stop_token::StopSource;
 use tokio::sync::mpsc::Sender;
 
-use crate::AnvilopeEvent;
+use crate::{anvilope_config, AnvilopeEvent};
 use crate::config::Account;
 use crate::db::Message;
 use crate::mail::parse::TextPartMimeType;
@@ -55,7 +55,8 @@ pub struct ImapSessionManager {
     // Option type is to handle how async-imap essentially destroys the session
     // object when entering idle state and gives you back a new one when leaving
     // idle
-    pub session_cell: Cell<Option<Session<TransportStream>>>,
+    pub session_cell: Mutex<Cell<Option<Session<TransportStream>>>>,
+    pub idle_stop_src: Mutex<Cell<Option<StopSource>>>,
     pub root_tx: Sender<AnvilopeEvent>,
     pub connected_at: DateTime<Utc>,
     pub healthy_at: DateTime<Utc>,
@@ -101,12 +102,14 @@ impl ImapSessionManager {
 
         info!("selecting mailbox INBOX");
         session.select("INBOX").await?;
-        let session_cell = Cell::new(Some(session));
+        let session_cell = Mutex::new(Cell::new(Some(session)));
+        let idle_stop_src = Mutex::new(Cell::new(None));
 
         Ok(ImapSessionManager {
             account_key: account._key.to_owned(),
             root_tx,
             session_cell,
+            idle_stop_src,
             connected_at,
             healthy_at,
             backoff_count,
@@ -114,9 +117,8 @@ impl ImapSessionManager {
     }
 
     pub async fn logout(&self) -> Result<()> {
-        let mut session = self.session_cell.replace(None)
-            .ok_or_else(|| anyhow!("expected active IMAP session, found None"))?;
-        session.logout().await?;
+        let session_cell = self.session_cell.lock().await;
+        session_cell.take().unwrap().logout().await?;
         Ok(())
     }
 
@@ -163,38 +165,115 @@ impl ImapSessionManager {
         }
     }
 
-    pub fn spawn_listener(listener_ref: Arc<Mutex<ImapSessionManager>>) -> () {
+    pub fn spawn_listener(sess_man: Arc<ImapSessionManager>) -> () {
         tokio::spawn(async move {
-            let mut local_listener = listener_ref.lock().await;
-            let result = local_listener.listen_for_messages().await;
+            let result = sess_man.listen_for_messages().await;
             match result {
                 Ok(event) => {
-                    local_listener.root_tx.send(event).await.unwrap();
+                    sess_man.root_tx.send(event).await.unwrap();
                 }
                 Err(err) => {
                     error!("listen_for_messages() error: {:#?}", err);
                     Self::spawn_reconnect_handler(
                         &err,
-                        local_listener.account_key.to_owned(),
-                        local_listener.healthy_at,
-                        local_listener.backoff_count,
-                        local_listener.root_tx.clone(),
+                        sess_man.account_key.to_owned(),
+                        sess_man.healthy_at,
+                        sess_man.backoff_count,
+                        sess_man.root_tx.clone(),
                     );
                 }
             };
         });
     }
 
-    async fn listen_for_messages(&mut self) -> Result<AnvilopeEvent> {
+    pub fn spawn_interrupt_copy_message(
+        sess_man: Arc<ImapSessionManager>,
+        src_mailbox: String,
+        uid: u32,
+        class_key: String,
+    ) -> () {
+        tokio::spawn(async move {
+            let interrupted = sess_man.clone().interrupt_idle().await;
+            let result = sess_man.copy_message_inner(src_mailbox, uid, class_key).await;
+            match result {
+                Ok(_) => {
+                    if interrupted {
+                        let account_key = sess_man.account_key.to_owned();
+                        sess_man.root_tx.send(AnvilopeEvent::AccountIdleTimeout { account_key }).await.unwrap();
+                    }
+                }
+                Err(err) => {
+                    error!("copy_message() error: {:#?}", err);
+                    Self::spawn_reconnect_handler(
+                        &err,
+                        sess_man.account_key.to_owned(),
+                        sess_man.healthy_at,
+                        sess_man.backoff_count,
+                        sess_man.root_tx.clone(),
+                    );
+                }
+            }
+        });
+    }
+
+    async fn copy_message_inner(&self, src_mailbox: String, uid: u32, class_key: String) -> Result<()> {
+        let session_cell = self.session_cell.lock().await;
+        let mut session = session_cell.take().unwrap();
+
+        let class = anvilope_config!().classes.iter().find(|c| c._key == class_key).unwrap();
+        let dest_folder = class.labels.get(&self.account_key).unwrap();
+        debug!("class_key = {}, {} -> {}", class_key, src_mailbox, dest_folder);
+
+        // check for destination folder
+        let ls_res = session.list(None, Some(dest_folder))
+            .await?
+            .collect::<Vec<_>>()
+            .await;
+        let dest_folder_exists = ls_res.iter().find(|maybe| {
+            if let Ok(name) = maybe {
+                name.name() == dest_folder
+            } else {
+                false
+            }
+        }).is_some();
+
+        if dest_folder_exists {
+            session.select(src_mailbox).await?;
+            session.uid_copy(uid.to_string(), dest_folder).await?;
+
+            debug!("uid_copy to {} finished", uid);
+        } else {
+            warn!("label {} does not exist for account {}", dest_folder, self.account_key);
+        }
+
+        // be polite, always put the session back
+        session_cell.set(Some(session));
+
+        Ok(())
+    }
+
+    async fn interrupt_idle(&self) -> bool {
+        let stop_src = self.idle_stop_src.lock().await.take();
+        if let Some(stop_src) = stop_src {
+            drop(stop_src);
+            debug!("interrupt IDLE");
+            return true;
+        }
+        debug!("interrupt requested, IDLE not running");
+        return false;
+    }
+
+    async fn listen_for_messages(&self) -> Result<AnvilopeEvent> {
         info!("entering idle state");
 
-        let session = self.session_cell.replace(None)
-            .ok_or_else(|| anyhow!("expected active IMAP session, found None"))?;
+        let session_cell = self.session_cell.lock().await;
+        let session = session_cell.take().unwrap();
         let mut idle_handle = session.idle();
         idle_handle.init().await?;
 
         // TODO: use interrupt token to logout from server gracefully
-        let (idle_wait, _interrupt) = idle_handle.wait_with_timeout(IDLE_DURATION);
+        let (idle_wait, stop_src) = idle_handle.wait_with_timeout(IDLE_DURATION);
+        self.idle_stop_src.lock().await.set(Some(stop_src));
 
         let result = match idle_wait.await? {
             IdleResponse::NewData(data) => {
@@ -215,7 +294,7 @@ impl ImapSessionManager {
             }
             IdleResponse::ManualInterrupt => {
                 let account_key = self.account_key.to_owned();
-                Ok(AnvilopeEvent::AccountIdleTimeout { account_key })
+                Ok(AnvilopeEvent::Noop { account_key })
             }
             IdleResponse::Timeout => {
                 let account_key = self.account_key.to_owned();
@@ -223,37 +302,38 @@ impl ImapSessionManager {
             }
         };
 
+        self.idle_stop_src.lock().await.take();
+
         // be polite, always put the session back
         let session = idle_handle.done().await?;
-        self.session_cell.replace(Some(session));
+        session_cell.set(Some(session));
 
         result
     }
 
-    pub async fn download_message(listener_ref: Arc<Mutex<ImapSessionManager>>, mailbox: String, ord: u32) -> () {
-        let mut local_listener = listener_ref.lock().await;
-        let result = local_listener.download_message_inner(&mailbox, &ord).await;
+    pub async fn download_message(sess_man: Arc<ImapSessionManager>, mailbox: String, ord: u32) -> () {
+        let result = sess_man.download_message_inner(&mailbox, &ord).await;
         match result {
             Ok(event) => {
-                local_listener.root_tx.send(event).await.unwrap();
+                sess_man.root_tx.send(event).await.unwrap();
             }
             Err(err) => {
                 // TODO: message likely not downloaded, should be retried
                 error!("download_message() error: {:#?}", err);
                 Self::spawn_reconnect_handler(
                     &err,
-                    local_listener.account_key.to_owned(),
-                    local_listener.healthy_at,
-                    local_listener.backoff_count,
-                    local_listener.root_tx.clone(),
+                    sess_man.account_key.to_owned(),
+                    sess_man.healthy_at,
+                    sess_man.backoff_count,
+                    sess_man.root_tx.clone(),
                 );
             }
         }
     }
 
-    async fn download_message_inner(&mut self, mailbox: &String, ord: &u32) -> Result<AnvilopeEvent> {
-        let mut session = self.session_cell.replace(None)
-            .ok_or_else(|| anyhow!("expected active IMAP session, found None"))?;
+    async fn download_message_inner(&self, mailbox: &String, ord: &u32) -> Result<AnvilopeEvent> {
+        let session_cell = self.session_cell.lock().await;
+        let mut session = session_cell.take().unwrap();
 
         session.select(mailbox).await?;
 
@@ -329,7 +409,7 @@ impl ImapSessionManager {
         };
 
         // always put the session back
-        self.session_cell.replace(Some(session));
+        session_cell.set(Some(session));
 
         let mut db_record = parse::parse_header(&self.account_key, &header)?;
         db_record.uid = uid;
