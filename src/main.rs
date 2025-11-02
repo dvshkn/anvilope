@@ -3,8 +3,14 @@ use anvilope::*;
 use anyhow::Result;
 use clap::ArgMatches;
 use clap::Command;
-use config::AnvilopeConfig;
-use env_logger::Env;
+use config::{
+    AnvilopeConfig,
+    RunMode,
+};
+use env_logger::{
+    Env,
+    Target,
+};
 use log::{
     debug,
     info,
@@ -25,7 +31,7 @@ use llm::{
 use mail::session::ImapSessionManager;
 
 fn init_config() {
-    crate::ANVILOPE_CONFIG.get_or_init(|| AnvilopeConfig::new());
+    crate::ANVILOPE_CONFIG.get_or_init(|| AnvilopeConfig::new(RunMode::Production));
 }
 
 fn init_globals() {
@@ -36,7 +42,9 @@ fn init_globals() {
 #[tokio::main]
 async fn main() -> Result<()> {
     // default log level is INFO if not specified
-    env_logger::Builder::from_env(Env::default().default_filter_or("debug")).init();
+    env_logger::Builder::from_env(Env::default().default_filter_or("debug"))
+        .target(Target::Stdout)
+        .init();
 
     let serve_cmd = Command::new("serve")
         .about("start Anvilope server and listen for emails");

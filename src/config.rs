@@ -27,6 +27,12 @@ use toml::{
 };
 use url::Url;
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum RunMode {
+    Production,
+    Test,
+}
+
 #[derive(Debug)]
 pub struct AnvilopeConfig {
     pub config_dir: PathBuf,
@@ -102,9 +108,17 @@ impl Class {
 }
 
 impl AnvilopeConfig {
-    pub fn new() -> AnvilopeConfig {
-        let home_dir = home::home_dir().unwrap();
-        let config_dir = home_dir.join(".anvilope/");
+    pub fn new(mode: RunMode) -> AnvilopeConfig {
+        let config_dir = match mode {
+            RunMode::Production => {
+                let home_dir = home::home_dir().unwrap();
+                let config_dir = home_dir.join(".anvilope/");
+                config_dir
+            },
+            RunMode::Test => {
+                std::fs::canonicalize("./tests/data").unwrap()
+            },
+        };
         let db_path = config_dir.join("anvilope.sqlite");
         let config_file_path = config_dir.join("anvilope.toml");
         let config_file_path_2 = config_file_path.clone();

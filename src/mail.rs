@@ -7,7 +7,10 @@ use async_imap::{
     Session,
 };
 use core::task::{Context, Poll};
-use log::info;
+use log::{
+    error,
+    info,
+};
 use rustls_pki_types::ServerName;
 use std::fmt;
 use std::io::IoSlice;
@@ -45,7 +48,10 @@ pub async fn connect(account: &Account) -> Result<Session<TransportStream>> {
 
     let imap_session = match client.login(account.username.to_owned(), account.password.to_owned()).await {
         Ok(s) => s,
-        Err(_) => panic!("cannot"),
+        Err(e) => {
+            error!("{:#?}", e);
+            panic!("IMAP login failed for account {}", account._key);
+        }
     };
 
     info!("connected to IMAP server {}", host_port);

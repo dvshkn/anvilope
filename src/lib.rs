@@ -27,6 +27,7 @@ macro_rules! checkout_db_conn {
     }
 }
 
+#[derive(Debug)]
 pub enum AnvilopeEvent {
     AccountDisconnect { account_key: String, backoff_count: f32 }, // possibly reconnect
     AccountIdleTimeout { account_key: String }, // restart idle loop
