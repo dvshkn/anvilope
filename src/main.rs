@@ -14,6 +14,7 @@ use env_logger::{
 use log::{
     debug,
     info,
+    warn,
 };
 use tokio::signal::ctrl_c;
 use tokio::sync::mpsc;
@@ -199,6 +200,16 @@ async fn cli_serve(_matches: &ArgMatches) -> Result<()> {
             }
             _ = ctrl_c() => {
                 info!("quit signal received");
+                for (_, sess_man) in key_listener_map {
+                    match sess_man.logout().await {
+                        Err(err) => {
+                            warn!("{} logout error: {:#?}", sess_man.account_key, err);
+                        },
+                        Ok(_) => {
+                            debug!("{} logout successful", sess_man.account_key);
+                        },
+                    };
+                }
                 break;
             }
         }
