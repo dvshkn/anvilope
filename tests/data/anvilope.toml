@@ -1,6 +1,6 @@
 [llm]
 ollama_host = "http://127.0.0.1:11434"
-ollama_model = "mistral:latest"
+model = "mistral:latest"
 context_length = 8192
 
 [accounts]

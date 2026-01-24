@@ -17,8 +17,8 @@ struct CreateUserReq {
     pub password: String,
 }
 
-const GREENMAIL_REST_URL: &str = "http://localhost:8080";
-const GREENMAIL_SMTP_URL: &str = "smtp://localhost:3025";
+const GREENMAIL_REST_URL: &str = "http://127.0.0.1:8080";
+const GREENMAIL_SMTP_URL: &str = "smtp://127.0.0.1:3025";
 
 pub async fn init() -> Result<()> {
     let client = reqwest::Client::new();
