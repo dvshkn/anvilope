@@ -17,6 +17,8 @@ pub struct LlmCompletion {
     pub created_at: i64,
 }
 
+// TODO: remove endpoint_response column
+
 impl DbTable for LlmCompletion {
     const DDL: &'static str = "CREATE TABLE llm_completion (
         id INTEGER PRIMARY KEY,

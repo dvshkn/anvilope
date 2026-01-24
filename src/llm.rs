@@ -1,3 +1,4 @@
+mod inference;
 mod prompt;
 
 use anyhow::{
@@ -8,10 +9,8 @@ use log::{
     debug,
     error,
     info,
-    warn,
 };
 use minijinja::Environment;
-use reqwest;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -25,6 +24,11 @@ use crate::db::{
     Class, Classifier, LlmCompletion, LlmJob, Message
 };
 use crate::AnvilopeEvent;
+
+use inference::{
+    InferenceApi,
+    Ollama,
+};
 
 pub const JOB_STATE_QUEUED: &'static str = "queued";
 pub const JOB_STATE_PROCESSING: &'static str = "processing";
@@ -41,7 +45,8 @@ pub const LLM_RESPONSE_FORMAT: &'static str = r#"
 "#;
 
 pub struct Llm {
-    pub ollama_host: String,
+    // pub ollama_host: String,
+    pub api: Box<dyn InferenceApi>,
     pub template_env: Environment<'static>,
     pub classifier_id: i64,
     pub class_key_id_map: HashMap<String, i64>,
@@ -74,10 +79,29 @@ pub struct OllamaGenerateOptions {
     pub temperature: f64,
 }
 
-impl Llm {
+impl Llm  {
     pub async fn new(root_tx: Sender<AnvilopeEvent>) -> Result<Llm> {
-        let ollama_host = anvilope_config!().llm.ollama_host.to_owned();
+        // let ollama_host = anvilope_config!().llm.ollama_host.to_owned();
         let busy = Mutex::new(false);
+
+        // setup for inference calls
+        let api = if let Some(ollama_host) = anvilope_config!().llm.ollama_host.as_ref() {
+            Ollama {
+                host: ollama_host.to_owned(),
+                model: anvilope_config!().llm.model.to_owned(),
+                num_ctx: anvilope_config!().llm.context_length,
+                temperature: anvilope_config!().llm.temperature,
+            }
+        } else if let Some(llama_cpp_host) = anvilope_config!().llm.llama_cpp_host.as_ref() {
+            Ollama {
+                host: llama_cpp_host.to_owned(),
+                model: anvilope_config!().llm.model.to_owned(),
+                num_ctx: anvilope_config!().llm.context_length,
+                temperature: anvilope_config!().llm.temperature,
+            }
+        } else {
+            return Err(Error::msg("bad config: no inference host"));
+        };
 
         // assemble prompt templates
         let mut template_env = Environment::new();
@@ -88,7 +112,7 @@ impl Llm {
         // make sure database reflects current configuration
         let (classifier_id, class_key_id_map) = Self::sync_prompts().await?;
 
-        Ok(Llm { ollama_host, template_env, classifier_id, class_key_id_map, root_tx, busy })
+        Ok(Llm { api: Box::new(api), template_env, classifier_id, class_key_id_map, root_tx, busy })
     }
 
     pub fn spawn(llm_ref: Arc<Llm>) -> () {
@@ -176,10 +200,7 @@ impl Llm {
             &message.subject,
             &body,
         )?;
-        let endpoint_response = self.ollama_generate(prompt).await?;
-        let response: OllamaGenerateResponse = serde_json::from_str(endpoint_response.as_str())?;
-        debug!("{:#?}", response);
-        let llm_response = response.response;
+        let llm_response = self.api.generate(prompt).await?;
         let classifier_id = Classifier::get_active().await?.unwrap().id;
 
         let mut class_id: Option<i64> = None;
@@ -194,6 +215,9 @@ impl Llm {
             },
         };
 
+        // TODO: remove when this column is gone
+        let endpoint_response = "n/a".to_string();
+
         let completion = LlmCompletion::create(
             message_id,
             classifier_id,
@@ -203,42 +227,7 @@ impl Llm {
             class_key,
         ).await?;
 
-        let ctx_len = anvilope_config!().llm.context_length;
-        if response.prompt_eval_count >= ctx_len {
-            warn!("prompt was likely truncated and will impact LLM results (len={})", response.prompt_eval_count);
-        }
-
         Ok(completion)
-    }
-
-    /// Actually send request to Ollama server
-    pub async fn ollama_generate(&self, prompt: String) -> Result<String> {
-        debug!("sending prompt to ollama -- {}", prompt);
-
-        let host = anvilope_config!().llm.ollama_host.to_owned();
-        let model = anvilope_config!().llm.ollama_model.to_owned();
-        let url = format!("{}/api/generate", host);
-        let num_ctx = anvilope_config!().llm.context_length;
-        let num_predict = Some(prompt::MAX_OUTPUT_LEN);
-        let temperature = anvilope_config!().llm.temperature;
-
-        let body = OllamaGenerateBody {
-            prompt,
-            model,
-            format: serde_json::from_str(LLM_RESPONSE_FORMAT)?,
-            raw: false,
-            stream: false,
-            options: OllamaGenerateOptions { num_ctx, num_predict, temperature },
-        };
-
-        let client = reqwest::Client::new();
-        let res = client.post(url)
-            .json(&body)
-            .send()
-            .await?
-            .error_for_status()?;
-
-        Ok(res.text().await?)
     }
 
     /// Takes the LLM response and attempts to cleanly extract the chosen class.

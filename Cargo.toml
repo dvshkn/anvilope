@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.97"
 async-imap = { version = "0.10.4", features = ["runtime-tokio"], default-features = false }
+async-trait = "0.1.89"
 base64 = "0.22.1"
 chrono = "0.4.40"
 clap = "4.5.36"

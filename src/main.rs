@@ -25,10 +25,7 @@ use db::{
     LlmJob,
     Message,
 };
-use llm::{
-    Llm,
-    OllamaGenerateResponse,
-};
+use llm::Llm;
 use mail::session::ImapSessionManager;
 
 fn init_config() {
@@ -112,9 +109,7 @@ async fn cli_damprun(_matches: &ArgMatches) -> Result<()> {
     let llm = Llm::new(tx.clone()).await?;
     let llm_prompt = "Classify the following message as either spam or not spam: This is a spam message.".to_string();
     info!("sending Ollama test prompt: {}", llm_prompt);
-    let llm_raw = llm.ollama_generate(llm_prompt).await?;
-    let llm_struct: OllamaGenerateResponse = serde_json::from_str(llm_raw.as_str())?;
-    let llm_response = llm_struct.response;
+    let llm_response = llm.api.generate(llm_prompt).await?;
     info!("Ollama response: {:?}", llm_response);
     info!("can connect to Ollama server");
 
@@ -127,6 +122,7 @@ async fn cli_serve(_matches: &ArgMatches) -> Result<()> {
     info!("starting anvilope server...");
 
     init_globals();
+    anvilope_config!().validate()?;
     db::ensure_tables();
 
     let (tx, mut rx) = mpsc::channel::<AnvilopeEvent>(4096);

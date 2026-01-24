@@ -46,8 +46,9 @@ pub struct AnvilopeConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct Llm {
-    pub ollama_host: String,
-    pub ollama_model: String,
+    pub ollama_host: Option<String>,
+    pub llama_cpp_host: Option<String>,
+    pub model: String,
 
     #[serde(default = "Llm::default_context_length")]
     pub context_length: usize,
@@ -167,8 +168,18 @@ impl AnvilopeConfig {
         let mut error = false;
 
         // check inference endpoint
-        if let Err(_) = Url::parse(self.llm.ollama_host.as_str()) {
-            error!("ollama_host is not a valid URL");
+        if let Some(ollama_host) = self.llm.ollama_host.as_ref() {
+            if let Err(_) = Url::parse(ollama_host.as_str()) {
+                error!("ollama_host is not a valid URL");
+                error = true;
+            }
+        } else if let Some(llama_cpp_host) = self.llm.llama_cpp_host.as_ref() {
+            if let Err(_) = Url::parse(llama_cpp_host.as_str()) {
+                error!("llama_cpp_host is not a valid URL");
+                error = true;
+            }
+        } else {
+            error!("no inference API host specified");
             error = true;
         }
 
