@@ -92,6 +92,22 @@ impl Llm {
 
 impl Account {
     fn default_use_tls() -> bool { true }
+
+    fn username_from_env(_key: &String) -> String {
+        let var_name = format!("ANV_CONFIG__ACCOUNTS__{}__USERNAME", _key.to_uppercase());
+        if let Ok(value) = std::env::var(var_name) {
+            return value.to_owned();
+        }
+        return "".to_string();
+    }
+
+    fn password_from_env(_key: &str) -> String {
+        let var_name = format!("ANV_CONFIG__ACCOUNTS__{}__PASSWORD", _key.to_uppercase());
+        if let Ok(value) = std::env::var(var_name) {
+            return value.to_owned();
+        }
+        return "".to_string();
+    }
 }
 
 impl Classifier {
@@ -246,8 +262,16 @@ impl AnvilopeConfig {
             let mut account_map = section[k].as_table()
                 .ok_or(anyhow!("malformed account entry: {}", k))?
                 .to_owned();
+
             // Retain the user-provided key
             account_map.insert("_key".to_string(), Value::String(k.to_owned()));
+            if account_map.get("username").is_none() {
+                account_map.insert("username".to_string(), Value::String(Account::username_from_env(k)));
+            }
+            if account_map.get("password").is_none() {
+                account_map.insert("password".to_string(), Value::String(Account::password_from_env(k)));
+            }
+
             let account = account_map.try_into()?;
             accounts.push(account);
         }
