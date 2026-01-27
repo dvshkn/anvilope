@@ -163,9 +163,9 @@ pub fn find_text_parts(root: &BodyStructure) -> Vec<TextPartDescriptor> {
                 // no-op
             },
             BodyStructure::Text { common, other, lines: _, extension: _ } => {
-                let is_text = common.ty.ty == "TEXT";
-                let is_plain = common.ty.subtype == "PLAIN";
-                let is_html = common.ty.subtype == "HTML";
+                let is_text = common.ty.ty.to_uppercase() == "TEXT";
+                let is_plain = common.ty.subtype.to_uppercase() == "PLAIN";
+                let is_html = common.ty.subtype.to_uppercase() == "HTML";
                 if is_text && (is_plain || is_html) {
                     if path.len() == 0 { // single-part email case
                         path.push(1);
