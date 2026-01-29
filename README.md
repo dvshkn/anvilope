@@ -10,13 +10,13 @@ prompt as well as what model to use are all user customizable.
 The vision of this project is to create a more flexible version of Google's
 inbox categories that can be used with any email service.
 
-### Some Highlights
+#### Some Highlights
 + Written in Rust
 + Ollama for inference
 + Customize your own classes
 + Specify destination folders for each class
 
-### What it looks like
+#### What it looks like
 ![example screenshot of Anvilope processing an incoming email](screenshot.png)
 
 Status
@@ -38,12 +38,12 @@ if this poses a security problem.)
 Install
 -------
 
-### Requirements
+#### Requirements
 + Recent version of Rust
 + Ollama with one's model of choice installed
 + Email account accessible over IMAP
 
-### Build
+#### Build
 The project should build fine with cargo:
 ```
 cargo build
@@ -80,7 +80,7 @@ Changes will need to be made for:
 + Optionally, the individual classes and each `prompt` in the classes section
 + Optionally, what label to assign emails in each class (Note: labels are IMAP folders)
 
-### IMAP Credentials
+#### IMAP Credentials
 If credentials for an IMAP account are not specified in the configuration file
 Anvilope will attempt to load them from environment variables instead.
 Environment variable names depend on the account name used in the configuration
@@ -93,9 +93,9 @@ $ANV_CONFIG__ACCOUNTS__GLITCHMAIL__USERNAME
 $ANV_CONFIG__ACCOUNTS__GLITCHMAIL__PASSWORD
 ```
 
-### Writing Prompts
+#### Writing Prompts
 
-#### Template Variables
+##### Template Variables
 
 Anvilope uses basic jinja templating to assemble its final prompts that get sent
 to the LLM. Special variables are used to allow for customizing where different
@@ -105,7 +105,7 @@ pieces of content get inserted.
 + in the classes section
 + `{{ email_message }}`: the content of the current incoming email message
 
-#### Response Format
+##### Response Format
 
 Anvilope's harness expects a specific JSON format on LLM responses. This simple
 format is shown below:
@@ -124,7 +124,7 @@ Respond in JSON format with a single object containing "reasoning" and "class"
 properties.
 ```
 
-### Testing
+#### Testing
 
 Once the configuration file is ready Anvilope includes utilities for validating
 the settings.
