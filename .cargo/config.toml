@@ -1,3 +1,5 @@
 [alias]
 utest = "test --lib --bins"
 itest = "test --test integration -- --test-threads=1"
+devcmd_init = "test --test devcmd -- init_greenmail"
+devcmd_send_email = "test --test devcmd -- send_email"

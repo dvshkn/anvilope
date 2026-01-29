@@ -10,6 +10,8 @@ use log::{
 use reqwest;
 use serde::Serialize;
 
+use anvilope::*;
+
 #[derive(Debug, Serialize)]
 struct CreateUserReq {
     pub email: String,
@@ -53,6 +55,12 @@ pub async fn init() -> Result<()> {
         .send()
         .await?
         .error_for_status()?;
+
+    // create folders
+    let account = anvilope_config!().accounts.first().unwrap();
+    let mut session = mail::connect(&account).await?;
+    session.create("anv_personal").await?;
+    session.create("anv_marketing").await?;
 
     Ok(())
 }
