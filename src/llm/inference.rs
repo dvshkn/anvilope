@@ -60,7 +60,7 @@ pub const LLM_RESPONSE_FORMAT: &'static str = r#"
 #[async_trait]
 impl InferenceApi for Ollama {
     async fn generate(&self, prompt: String) -> Result<String> {
-        debug!("sending prompt to ollama -- {}", prompt);
+        debug!("sending prompt to ollama\n{}", prompt);
 
         let model = self.model.to_owned();
         let url = format!("{}/api/generate", self.host);
