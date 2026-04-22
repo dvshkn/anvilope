@@ -42,7 +42,7 @@ impl Meta {
         tokio::task::spawn_blocking(move || {
             let conn = checkout_db_conn!();
             super::exec_return_first(&conn,
-                "SELECT id, key, value, updated_at FROM settings
+                "SELECT id, key, value, updated_at FROM meta
                 WHERE key = ? ORDER BY id ASC LIMIT 1",
                 [&key]
             )

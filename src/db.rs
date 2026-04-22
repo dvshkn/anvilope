@@ -5,6 +5,7 @@ pub mod db_table;
 pub mod llm_job;
 pub mod message;
 pub mod meta;
+pub mod migrate;
 
 pub use class::Class;
 pub use classifier::Classifier;
@@ -17,7 +18,6 @@ pub use meta::Meta;
 use anyhow::Result;
 use log::{
     debug,
-    info,
 };
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
@@ -25,7 +25,6 @@ use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 use rusqlite::Params;
 use rusqlite::Row;
-use std::collections::HashSet;
 
 use crate::anvilope_config;
 use crate::checkout_db_conn;
@@ -40,31 +39,22 @@ pub fn init_pool() -> Pool<SqliteConnectionManager> {
     pool
 }
 
-pub fn ensure_tables() {
+pub fn ensure_tables() -> Result<()> {
     let conn = checkout_db_conn!();
 
-    let mut expected_tables = HashSet::from([
-        "class", "classifier", "llm_completion", "llm_job", "message", "meta",
-    ]);
-    let num_expected = expected_tables.len();
+    let num_tables = exec_return_int(
+        &conn,
+        "SELECT count(name) FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+        []
+    )?;
 
-    let mut stmt = conn.prepare(
-        "SELECT name FROM sqlite_schema WHERE type='table'
-        AND name NOT LIKE 'sqlite_%'"
-    ).unwrap();
-    let mut name_iter = stmt.query_map([], |row| row.get::<_,String>(0)).unwrap();
-    while let Some(Ok(table_name)) = name_iter.next() {
-        expected_tables.remove(table_name.as_str());
-    }
-
-    if expected_tables.len() == num_expected {
+    if num_tables <= 0 {
         // none of the tables present, probably a fresh db
-        info!("database is empty, creating tables");
-        create_tables();
-    } else if expected_tables.len() > 0 {
-        panic!("some database tables missing, possible corruption or
-            version mismatch");
+        migrate::seed_database(&conn)?;
     }
+    migrate::run_migrations(&conn)?;
+
+    Ok(())
 }
 
 pub fn create_tables() {

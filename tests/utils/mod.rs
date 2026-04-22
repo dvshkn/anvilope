@@ -32,7 +32,7 @@ pub async fn init() -> Result<()> {
 
         // init a new database
         anvilope::DB_POOL.get_or_init(|| db::init_pool());
-        db::ensure_tables();
+        db::ensure_tables()?;
 
         // init greenmail user accounts
         greenmail::init().await?;

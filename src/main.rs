@@ -88,7 +88,7 @@ async fn cli_damprun(_matches: &ArgMatches) -> Result<()> {
     cli_dryrun(&_matches.clone()).await?;
 
     init_globals();
-    db::ensure_tables();
+    db::ensure_tables()?;
     llm::Llm::sync_prompts().await?;
 
     // test database by writing a timestamp
@@ -123,7 +123,7 @@ async fn cli_serve(_matches: &ArgMatches) -> Result<()> {
 
     init_globals();
     anvilope_config!().validate()?;
-    db::ensure_tables();
+    db::ensure_tables()?;
 
     let (tx, mut rx) = mpsc::channel::<AnvilopeEvent>(4096);
 
