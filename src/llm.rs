@@ -28,6 +28,7 @@ use crate::AnvilopeEvent;
 use inference::{
     InferenceApi,
     Ollama,
+    LlamaCpp,
 };
 
 pub const JOB_STATE_QUEUED: &'static str = "queued";
@@ -45,7 +46,6 @@ pub const LLM_RESPONSE_FORMAT: &'static str = r#"
 "#;
 
 pub struct Llm {
-    // pub ollama_host: String,
     pub api: Box<dyn InferenceApi>,
     pub template_env: Environment<'static>,
     pub classifier_id: i64,
@@ -81,24 +81,23 @@ pub struct OllamaGenerateOptions {
 
 impl Llm  {
     pub async fn new(root_tx: Sender<AnvilopeEvent>) -> Result<Llm> {
-        // let ollama_host = anvilope_config!().llm.ollama_host.to_owned();
         let busy = Mutex::new(false);
 
         // setup for inference calls
-        let api = if let Some(ollama_host) = anvilope_config!().llm.ollama_host.as_ref() {
-            Ollama {
+        let api: Box<dyn InferenceApi> = if let Some(ollama_host) = anvilope_config!().llm.ollama_host.as_ref() {
+            Box::new(Ollama {
                 host: ollama_host.to_owned(),
                 model: anvilope_config!().llm.model.to_owned(),
                 num_ctx: anvilope_config!().llm.context_length,
                 temperature: anvilope_config!().llm.temperature,
-            }
+            })
         } else if let Some(llama_cpp_host) = anvilope_config!().llm.llama_cpp_host.as_ref() {
-            Ollama {
+            Box::new(LlamaCpp {
                 host: llama_cpp_host.to_owned(),
                 model: anvilope_config!().llm.model.to_owned(),
                 num_ctx: anvilope_config!().llm.context_length,
                 temperature: anvilope_config!().llm.temperature,
-            }
+            })
         } else {
             return Err(Error::msg("bad config: no inference host"));
         };
@@ -112,7 +111,7 @@ impl Llm  {
         // make sure database reflects current configuration
         let (classifier_id, class_key_id_map) = Self::sync_prompts().await?;
 
-        Ok(Llm { api: Box::new(api), template_env, classifier_id, class_key_id_map, root_tx, busy })
+        Ok(Llm { api, template_env, classifier_id, class_key_id_map, root_tx, busy })
     }
 
     pub fn spawn(llm_ref: Arc<Llm>) -> () {

@@ -51,7 +51,7 @@ async fn main() -> Result<()> {
         .about("load and check configuration");
 
     let damprun_cmd = Command::new("damprun")
-        .about("dry run, init the database, connect to email servers, connect to ollama, exit");
+        .about("dry run, init the database, connect to email servers, connect to inference host, exit");
 
     let cli = Command::new("anvilope")
         .about("Anvilope: A heavy-handed approach to email")
@@ -105,13 +105,13 @@ async fn cli_damprun(_matches: &ArgMatches) -> Result<()> {
     }
     info!("can connect to IMAP server(s)");
 
-    // test ollama
+    // test inference
     let llm = Llm::new(tx.clone()).await?;
     let llm_prompt = "Classify the following message as either spam or not spam: This is a spam message.".to_string();
-    info!("sending Ollama test prompt: {}", llm_prompt);
+    info!("sending test prompt to inference host: {}", llm_prompt);
     let llm_response = llm.api.generate(llm_prompt).await?;
-    info!("Ollama response: {:?}", llm_response);
-    info!("can connect to Ollama server");
+    info!("inference response: {:?}", llm_response);
+    info!("can connect to inference host");
 
     info!("damp run finished");
 

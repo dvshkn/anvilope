@@ -1,6 +1,6 @@
 [llm]
-ollama_host = "http://127.0.0.1:11434"
-model = "mistral:latest"
+llama_cpp_host = "http://127.0.0.1:8080"
+model = "unsloth/Qwen3.5-4B-GGUF:Q4_K_M"
 context_length = 8192
 
 [accounts]

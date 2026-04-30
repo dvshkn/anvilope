@@ -10,5 +10,5 @@ podman run -t -i -e GREENMAIL_OPTS="$GREENMAIL_OPTS" \
     -p 3465:3465 \
     -p 3993:3993 \
     -p 3995:3995 \
-    -p 8080:8080 \
+    -p 8081:8080 \
     docker.io/$IMAGE_NAME

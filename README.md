@@ -12,7 +12,7 @@ inbox categories that can be used with any email service.
 
 #### Some Highlights
 + Written in Rust
-+ Ollama for inference
++ Llama.cpp or Ollama for inference
 + Customize your own classes
 + Specify destination folders for each class
 
@@ -40,7 +40,7 @@ Install
 
 #### Requirements
 + Recent version of Rust
-+ Ollama with one's model of choice installed
++ Llama.cpp's `llama-server` or `ollama` installed with one's model of choice
 + Email account accessible over IMAP
 
 #### Build
@@ -73,7 +73,8 @@ integration tests can be a good starting point and is located at
 `tests/data/anvilope.toml`.
 
 Changes will need to be made for:
-+ The location of `ollama_host` and which `model` to use in the LLM section
++ The location of either `llama_cpp_host` or `ollama_host` and which `model` to
+  use in the LLM section
 + The IMAP account information in the accounts section
 + Optionally, the IMAP account name to something more fitting than "greenmail"
 + Optionally, the main `prompt` template in the classifier section
@@ -137,8 +138,8 @@ anvilope dryrun
 
 A "damp run" will go a step further and connect to external services to ensure
 that everything is hooked up correctly. It specifically attempts to connect to
-any specified IMAP servers and also attempts to run a sample prompt through
-Ollama:
+any specified IMAP servers and also attempts to run a sample prompt through the
+configured inference host:
 ```
 anvilope damprun
 ```
