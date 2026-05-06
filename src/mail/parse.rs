@@ -1,6 +1,9 @@
 use std::collections::VecDeque;
 
-use anyhow::Result;
+use anyhow::{
+    Error,
+    Result
+};
 use async_imap::imap_proto::{
     BodyStructure,
     ContentEncoding,
@@ -11,6 +14,10 @@ use base64::prelude::{
     Engine,
 };
 use chrono::DateTime;
+use html_to_markdown_rs::{
+    ConversionOptions,
+    convert,
+};
 use log::{
     debug,
     warn,
@@ -227,6 +234,18 @@ pub fn decode_utf8(bytes: &[u8], encoding: &TextPartEncoding) -> Option<String> 
         }
     }
     None
+}
+
+/// Converts decoded HTML content to Markdown
+pub fn html_to_markdown(html: &str) -> Result<String> {
+    let options = ConversionOptions::builder()
+        .wrap(false)
+        .build();
+    let res = html_to_markdown_rs::convert(html, Some(options))?;
+    match res.content {
+        Some(md) => Ok(md),
+        None => Err(Error::msg("markdown conversion returned no content"))
+    }
 }
 
 #[cfg(test)]

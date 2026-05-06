@@ -24,6 +24,7 @@ use crate::db::{
     Class, Classifier, LlmCompletion, LlmJob, Message
 };
 use crate::AnvilopeEvent;
+use crate::mail::parse;
 
 use inference::{
     InferenceApi,
@@ -185,12 +186,19 @@ impl Llm  {
         let message = Message::get(message_id).await?
             .ok_or(Error::msg("message not found in db"))?;
 
-        // TODO: add config flag to prefer HTML
-        let body = if message.body_plain.len() > 0 || message.body_html.len() == 0 {
-            message.body_plain
-        } else {
-            message.body_html
-        };
+        //
+        // decide whether to read plain text or HTML content
+        //
+        // TODO: add config flag to prefer plain text
+        let mut body = "(body content could not be decoded)".to_string();
+        if message.body_html.len() > 0 {
+            // TODO: add config flag to allow for raw HTML
+            if let Ok(body_md) = parse::html_to_markdown(&message.body_html) {
+                body = body_md;
+            }
+        } else if message.body_plain.len() > 0 {
+            body = message.body_plain;
+        }
 
         let prompt = prompt::assemble_prompt(
             &self.template_env,

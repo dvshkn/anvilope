@@ -156,8 +156,9 @@ pub struct ChatCompletionsRequest {
     pub stream: bool,
     pub temperature: f64,
 
-    // OpenAI name: max_tokens / max_completion_tokens
-    pub n_predict: usize,
+    // NOTE: want max_tokens > thinking_budget_tokens
+    pub max_tokens: usize,
+    pub thinking_budget_tokens: usize,
 
     // NOTE: OpenAI-compatible response_format field seems bugged atm, using
     //       llama.cpp's json_schema field instead
@@ -189,7 +190,9 @@ impl InferenceApi for LlamaCpp {
             stream: false,
             temperature: self.temperature,
             // TOOD: refactor token budgeting logic in llm.rs
-            n_predict: self.num_ctx / 8,
+            max_tokens: self.num_ctx / 8,
+            thinking_budget_tokens: 0,
+            // TODO: add config option to enable thinking budget
             json_schema: serde_json::from_str(LLM_RESPONSE_FORMAT)?,
         };
 
