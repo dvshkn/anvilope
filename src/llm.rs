@@ -1,5 +1,5 @@
+pub mod prompt;
 mod inference;
-mod prompt;
 
 use anyhow::{
     Error,
@@ -10,7 +10,6 @@ use log::{
     error,
     info,
 };
-use minijinja::Environment;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -31,6 +30,7 @@ use inference::{
     Ollama,
     LlamaCpp,
 };
+use prompt::ClassificationChat;
 
 pub const JOB_STATE_QUEUED: &'static str = "queued";
 pub const JOB_STATE_PROCESSING: &'static str = "processing";
@@ -48,7 +48,6 @@ pub const LLM_RESPONSE_FORMAT: &'static str = r#"
 
 pub struct Llm {
     pub api: Box<dyn InferenceApi>,
-    pub template_env: Environment<'static>,
     pub classifier_id: i64,
     pub class_key_id_map: HashMap<String, i64>,
     pub root_tx: Sender<AnvilopeEvent>,
@@ -103,16 +102,10 @@ impl Llm  {
             return Err(Error::msg("bad config: no inference host"));
         };
 
-        // assemble prompt templates
-        let mut template_env = Environment::new();
-        template_env.add_template("classifier", anvilope_config!().classifier.prompt.as_str())?;
-        template_env.add_template("classes", prompt::TEMPLATE_CLASSES)?;
-        template_env.add_template("email_message", prompt::TEMPLATE_EMAIL_MESSAGE)?;
-
         // make sure database reflects current configuration
         let (classifier_id, class_key_id_map) = Self::sync_prompts().await?;
 
-        Ok(Llm { api, template_env, classifier_id, class_key_id_map, root_tx, busy })
+        Ok(Llm { api, classifier_id, class_key_id_map, root_tx, busy })
     }
 
     pub fn spawn(llm_ref: Arc<Llm>) -> () {
@@ -182,6 +175,18 @@ impl Llm  {
         Ok((classifier_id, class_key_id_map))
     }
 
+    pub async fn run_chat(&self, chat: &mut ClassificationChat) -> Result<String> {
+        let mut messages_remaining = chat.count_empty_assistant_messages();
+        while messages_remaining > 0 {
+            let chat_messages = chat.in_context_messages();
+            let assistant_response = self.api.generate(chat_messages).await?;
+            messages_remaining = chat.push_assistant_content(assistant_response)?;
+        }
+        let final_response = chat.last_message()?.content.clone().unwrap();
+
+        Ok(final_response)
+    }
+
     pub async fn classify(&self, message_id: i64) -> Result<LlmCompletion> {
         let message = Message::get(message_id).await?
             .ok_or(Error::msg("message not found in db"))?;
@@ -200,19 +205,21 @@ impl Llm  {
             body = message.body_plain;
         }
 
-        let prompt = prompt::assemble_prompt(
-            &self.template_env,
+        let classify_prompt = prompt::assemble_prompt(
             &message.from_address,
             &message.from_name,
             &message.subject,
             &body,
         )?;
-        let llm_response = self.api.generate(prompt).await?;
+
+        let mut chat = ClassificationChat::new(classify_prompt)?;
+        let final_response = self.run_chat(&mut chat).await?;
+
         let classifier_id = Classifier::get_active().await?.unwrap().id;
 
         let mut class_id: Option<i64> = None;
         let mut class_key: Option<String> = None;
-        match self.process_llm_response(&llm_response).await {
+        match self.process_llm_response(&final_response).await {
             Ok((id, key)) => {
                 class_id = Some(id);
                 class_key = Some(key);
@@ -228,7 +235,7 @@ impl Llm  {
         let completion = LlmCompletion::create(
             message_id,
             classifier_id,
-            llm_response,
+            final_response,
             endpoint_response,
             class_id,
             class_key,

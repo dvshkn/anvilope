@@ -5,11 +5,19 @@ pub mod mail;
 
 pub static ANVILOPE_CONFIG: std::sync::OnceLock<config::AnvilopeConfig> = std::sync::OnceLock::new();
 pub static DB_POOL: std::sync::OnceLock<r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>> = std::sync::OnceLock::new();
+pub static TEMPLATE_ENV: std::sync::OnceLock<minijinja::Environment> = std::sync::OnceLock::new();
 
 #[macro_export]
 macro_rules! anvilope_config {
     () => {
         crate::ANVILOPE_CONFIG.get().unwrap()
+    }
+}
+
+#[macro_export]
+macro_rules! template_env {
+    () => {
+        crate::TEMPLATE_ENV.get().unwrap()
     }
 }
 

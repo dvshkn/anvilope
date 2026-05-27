@@ -14,34 +14,22 @@ use super::prompt;
 #[async_trait]
 pub trait InferenceApi: Send + Sync {
     // TODO: switch to chat-oriented flow, return messages instead of string
-    async fn generate(&self, prompt: String) -> Result<String>;
+    async fn generate(&self, messages: &[prompt::ChatMessage]) -> Result<String>;
 }
 
 pub const LLM_RESPONSE_FORMAT: &'static str = r#"
 {
     "type": "object",
     "properties": {
-        "reasoning": { "type": "string" },
-        "class": { "type": "string" }
+        "class": { "type": "string" },
+        "confidence": { "type": "string" },
+        "justification": { "type": "string" }
     },
-    "required": ["reasoning", "class"]
+    "required": ["class", "confidence", "justification"]
 }
 "#;
 
-pub const LLAMA_CPP_RESPONSE_FORMAT: &'static str = r#"
-{
-    "type": "json_schema",
-    "strict": true,
-    "schema": {
-        "type": "object",
-        "properties": {
-            "reasoning": { "type": "string" },
-            "class": { "type": "string" }
-        },
-        "required": ["reasoning", "class"]
-    }
-}
-"#;
+pub const LLAMA_CPP_DISABLE_THINKING_KWARGS: &'static str = r#"{"enable_thinking": false}"#;
 
 //
 // ollama support
@@ -79,7 +67,9 @@ pub struct OllamaGenerateOptions {
 
 #[async_trait]
 impl InferenceApi for Ollama {
-    async fn generate(&self, prompt: String) -> Result<String> {
+    async fn generate(&self, messages: &[prompt::ChatMessage]) -> Result<String> {
+        let prompt = messages.first().unwrap().content.as_ref().unwrap().clone();
+
         debug!("sending prompt to ollama\n{}", prompt);
 
         let model = self.model.to_owned();
@@ -150,19 +140,25 @@ pub struct CompletionUsage {
 }
 
 #[derive(Debug, Serialize)]
-pub struct ChatCompletionsRequest {
-    pub messages: Vec<CompletionMessage>,
+pub struct ChatCompletionsRequest<'msgs> {
+    pub messages: &'msgs [prompt::ChatMessage],
     pub model: String,
     pub stream: bool,
     pub temperature: f64,
 
     // NOTE: want max_tokens > thinking_budget_tokens
     pub max_tokens: usize,
-    pub thinking_budget_tokens: usize,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_budget_tokens: Option<usize>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat_template_kwargs: Option<Value>,
 
     // NOTE: OpenAI-compatible response_format field seems bugged atm, using
     //       llama.cpp's json_schema field instead
-    pub json_schema: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub json_schema: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -174,26 +170,33 @@ pub struct ChatCompletionsResponse {
 
 #[async_trait]
 impl InferenceApi for LlamaCpp {
-    async fn generate(&self, prompt: String) -> Result<String> {
-        debug!("sending prompt to llama.cpp\n{}", prompt);
+    async fn generate(&self, messages: &[prompt::ChatMessage]) -> Result<String> {
+        debug!("sending prompt to llama.cpp\n {:#?}", messages);
 
         let url = format!("{}/v1/chat/completions", self.host);
+
+        // only enforce JSON schema if specified by the message
+        let mut json_schema = Some(serde_json::from_str(LLM_RESPONSE_FORMAT)?);
+        if !messages.last().unwrap().force_json {
+            json_schema = None;
+        }
+
+        // TODO: add config option to enable thinking budget
+        // HACK: disabling thinking completely for now because of
+        //       instability with some models
+        let thinking_budget_tokens = Some(0);
+        let chat_template_kwargs = Some(serde_json::from_str(LLAMA_CPP_DISABLE_THINKING_KWARGS)?);
+
         let body = ChatCompletionsRequest {
-            messages: Vec::from([
-                CompletionMessage {
-                    role: "user".to_string(),
-                    content: prompt,
-                    reasoning_content: None,
-                }
-            ]),
+            messages,
             model: self.model.to_owned(),
             stream: false,
             temperature: self.temperature,
             // TOOD: refactor token budgeting logic in llm.rs
             max_tokens: self.num_ctx / 8,
-            thinking_budget_tokens: 0,
-            // TODO: add config option to enable thinking budget
-            json_schema: serde_json::from_str(LLM_RESPONSE_FORMAT)?,
+            thinking_budget_tokens,
+            chat_template_kwargs,
+            json_schema,
         };
 
         let client = reqwest::Client::new();

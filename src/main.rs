@@ -30,6 +30,14 @@ use mail::session::ImapSessionManager;
 
 fn init_config() {
     crate::ANVILOPE_CONFIG.get_or_init(|| AnvilopeConfig::new(RunMode::Production));
+    crate::TEMPLATE_ENV.get_or_init(|| {
+        let mut template_env = minijinja::Environment::new();
+        template_env.add_template("classifier", anvilope_config!().classifier.prompt.as_str()).unwrap();
+        template_env.add_template("classes", llm::prompt::TEMPLATE_CLASSES).unwrap();
+        template_env.add_template("email_message", llm::prompt::TEMPLATE_EMAIL_MESSAGE).unwrap();
+        template_env.add_template("system_prompt", llm::prompt::TEMPLATE_SYSTEM).unwrap();
+        template_env
+    });
 }
 
 fn init_globals() {
@@ -109,7 +117,8 @@ async fn cli_damprun(_matches: &ArgMatches) -> Result<()> {
     let llm = Llm::new(tx.clone()).await?;
     let llm_prompt = "Classify the following message as either spam or not spam: This is a spam message.".to_string();
     info!("sending test prompt to inference host: {}", llm_prompt);
-    let llm_response = llm.api.generate(llm_prompt).await?;
+    let mut chat = llm::prompt::ClassificationChat::new(llm_prompt)?;
+    let llm_response = llm.run_chat(&mut chat).await?;
     info!("inference response: {:?}", llm_response);
     info!("can connect to inference host");
 
