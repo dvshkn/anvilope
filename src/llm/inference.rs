@@ -2,6 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use log::{
     debug,
+    trace,
     warn,
 };
 use reqwest;
@@ -121,7 +122,8 @@ pub struct Ollama {
 #[async_trait]
 impl InferenceApi for Ollama {
     async fn generate(&self, messages: &[prompt::ChatMessage]) -> Result<String> {
-        debug!("sending prompt to ollama\n {:#?}", messages);
+        debug!("ollama POST /v1/chat/completions ({} messages)", messages.len());
+        trace!("ollama request messages: {:#?}", messages);
 
         let url = format!("{}/v1/chat/completions", self.host);
         let mut body = ChatCompletionsRequest {
@@ -154,7 +156,7 @@ impl InferenceApi for Ollama {
             .error_for_status()?;
         let res_text = res.text().await?;
         let modeled_res: ChatCompletionsResponse = serde_json::from_str(res_text.as_str())?;
-        debug!("{:#?}", modeled_res);
+        trace!("ollama response: {:#?}", modeled_res);
 
         if modeled_res.usage.prompt_tokens >= self.num_ctx {
             warn!("prompt exceeded context window length (num_ctx={}, prompt_len={})", self.num_ctx, modeled_res.usage.prompt_tokens);
@@ -181,7 +183,8 @@ pub struct LlamaCpp {
 #[async_trait]
 impl InferenceApi for LlamaCpp {
     async fn generate(&self, messages: &[prompt::ChatMessage]) -> Result<String> {
-        debug!("sending prompt to llama.cpp\n {:#?}", messages);
+        debug!("llama.cpp POST /v1/chat/completions ({} messages)", messages.len());
+        trace!("llama.cpp request messages: {:#?}", messages);
 
         let url = format!("{}/v1/chat/completions", self.host);
         let mut body = ChatCompletionsRequest {
@@ -217,7 +220,7 @@ impl InferenceApi for LlamaCpp {
             .error_for_status()?;
         let res_text = res.text().await?;
         let modeled_res: ChatCompletionsResponse = serde_json::from_str(res_text.as_str())?;
-        debug!("{:#?}", modeled_res);
+        trace!("llama.cpp response: {:#?}", modeled_res);
 
         if modeled_res.usage.prompt_tokens >= self.num_ctx {
             warn!("prompt exceeded context window length (num_ctx={}, prompt_len={})", self.num_ctx, modeled_res.usage.prompt_tokens);
