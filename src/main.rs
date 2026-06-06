@@ -1,8 +1,11 @@
 use anvilope::*;
 
 use anyhow::Result;
-use clap::ArgMatches;
-use clap::Command;
+use clap::{
+    Arg,
+    ArgMatches,
+    Command
+};
 use config::{
     AnvilopeConfig,
     RunMode,
@@ -59,7 +62,9 @@ async fn main() -> Result<()> {
         .about("load and check configuration");
 
     let damprun_cmd = Command::new("damprun")
-        .about("dry run, init the database, connect to email servers, connect to inference host, exit");
+        .about("dry run, init the database, connect to email servers, connect to inference host, exit")
+        .arg(Arg::new("skip-imap").help("do not connect to IMAP hosts"))
+        .arg(Arg::new("skip-llm").help("do not connect to LLM inference host"));
 
     let cli = Command::new("anvilope")
         .about("Anvilope: A heavy-handed approach to email")
@@ -90,11 +95,12 @@ async fn cli_dryrun(_matches: &ArgMatches) -> Result<()> {
     Ok(())
 }
 
-async fn cli_damprun(_matches: &ArgMatches) -> Result<()> {
+async fn cli_damprun(matches: &ArgMatches) -> Result<()> {
     info!("starting damp run...");
 
-    cli_dryrun(&_matches.clone()).await?;
+    cli_dryrun(&matches.clone()).await?;
 
+    let (tx, _) = mpsc::channel::<AnvilopeEvent>(4096);
     init_globals();
     db::ensure_tables()?;
     llm::Llm::sync_prompts().await?;
@@ -104,23 +110,26 @@ async fn cli_damprun(_matches: &ArgMatches) -> Result<()> {
     info!("database connection is functioning");
 
     // test configured email accounts
-    let (tx, _) = mpsc::channel::<AnvilopeEvent>(4096);
-    for acct in &anvilope_config!().accounts {
-        let consumer = ImapSessionManager::new(&acct, tx.clone(), 0.0).await?;
-        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-        consumer.logout().await?;
-        // TODO: when write-back support implemented check for existence of destination folders/labels here
+    if !matches.contains_id("skip-imap") {
+        for acct in &anvilope_config!().accounts {
+            let consumer = ImapSessionManager::new(&acct, tx.clone(), 0.0).await?;
+            tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+            consumer.logout().await?;
+            // TODO: when write-back support implemented check for existence of destination folders/labels here
+        }
+        info!("can connect to IMAP server(s)");
     }
-    info!("can connect to IMAP server(s)");
 
     // test inference
-    let llm = Llm::new(tx.clone()).await?;
-    let llm_prompt = "Classify the following message as either spam or not spam: This is a spam message.".to_string();
-    info!("sending test prompt to inference host: {}", llm_prompt);
-    let mut chat = llm::prompt::ClassificationChat::new(llm_prompt)?;
-    let llm_response = llm.run_chat(&mut chat).await?;
-    info!("inference response: {:?}", llm_response);
-    info!("can connect to inference host");
+    if !matches.contains_id("skip-llm") {
+        let llm = Llm::new(tx.clone()).await?;
+        let llm_prompt = "Classify the following message as either spam or not spam: This is a spam message.".to_string();
+        info!("sending test prompt to inference host: {}", llm_prompt);
+        let mut chat = llm::prompt::ClassificationChat::new(llm_prompt)?;
+        let llm_response = llm.run_chat(&mut chat).await?;
+        info!("inference response: {:?}", llm_response);
+        info!("can connect to inference host");
+    }
 
     info!("damp run finished");
 
