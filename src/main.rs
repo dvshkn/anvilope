@@ -51,7 +51,7 @@ fn init_globals() {
 #[tokio::main]
 async fn main() -> Result<()> {
     // default log level is INFO if not specified
-    env_logger::Builder::from_env(Env::default().default_filter_or("debug"))
+    env_logger::Builder::from_env(Env::default().default_filter_or("anvilope=debug"))
         .target(Target::Stdout)
         .init();
 
