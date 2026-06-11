@@ -10,6 +10,7 @@ use serde::{
 };
 
 use crate::anvilope_config;
+use crate::llm::inference::CompletionMessage;
 use crate::template_env;
 
 pub const TEMPLATE_EMAIL_MESSAGE: &'static str = r#"
@@ -39,8 +40,8 @@ Response acknowledged. The Anvilope system requires final classifications to be 
 
 pub const MAX_OUTPUT_LEN: usize = 1024; // tokens
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ChatRole {
     System,
     User,
@@ -50,13 +51,22 @@ pub enum ChatRole {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: ChatRole,
-    pub content: Option<String>,
+    pub content: String,
+
+    #[serde(skip)]
+    pub reasoning: Option<String>,
 
     #[serde(skip)]
     pub contextualized_at: Option<i64>,
 
     #[serde(skip)]
     pub force_json: bool,
+}
+
+impl From<&ChatMessage> for CompletionMessage {
+    fn from(msg: &ChatMessage) -> Self {
+        CompletionMessage { role: msg.role.clone(), content: msg.content.clone(), reasoning: msg.reasoning.clone() }
+    }
 }
 
 pub struct ClassificationChat {
@@ -84,7 +94,8 @@ impl ClassificationChat {
 
         messages.push(ChatMessage {
             role: ChatRole::System,
-            content: Some(prompt_system),
+            content: prompt_system,
+            reasoning: None,
             contextualized_at: Some(utc_timestamp),
             force_json: false,
         });
@@ -92,13 +103,15 @@ impl ClassificationChat {
         // classification
         messages.push(ChatMessage {
             role: ChatRole::User,
-            content: Some(classification_prompt),
+            content: classification_prompt,
+            reasoning: None,
             contextualized_at: Some(utc_timestamp),
             force_json: false,
         });
         messages.push(ChatMessage {
             role: ChatRole::Assistant,
-            content: None,
+            content: "".to_string(),
+            reasoning: None,
             contextualized_at: None,
             force_json: false,
         });
@@ -106,13 +119,15 @@ impl ClassificationChat {
         // json coersion
         messages.push(ChatMessage {
             role: ChatRole::User,
-            content: Some(prompt_json),
+            content: prompt_json,
+            reasoning: None,
             contextualized_at: None,
             force_json: true,
         });
         messages.push(ChatMessage {
             role: ChatRole::Assistant,
-            content: None,
+            content: "".to_string(),
+            reasoning: None,
             contextualized_at: None,
             force_json: false,
         });
@@ -138,7 +153,7 @@ impl ClassificationChat {
 
         let message = &self.messages[self.messages.len()-1];
 
-        if message.contextualized_at.is_none() || message.content.is_none() {
+        if message.contextualized_at.is_none() {
             return Err(Error::msg("last message is empty, not in context window"));
         }
 
@@ -152,13 +167,14 @@ impl ClassificationChat {
 
     /// sets content for the next empty assistant-role message, returns number
     /// of remaining empty assistant messages
-    pub fn push_assistant_content(&mut self, content: String) -> Result<usize> {
+    pub fn push_assistant_message(&mut self, msg: &ChatMessage) -> Result<usize> {
         let index = self.messages.iter()
             .position(|msg| msg.contextualized_at.is_none())
             .ok_or_else(|| Error::msg("unexpected assistant response"))?;
         let now = chrono::Utc::now().timestamp_millis();
 
-        self.messages[index].content = Some(content);
+        self.messages[index].content = msg.content.clone();
+        self.messages[index].reasoning = msg.reasoning.clone();
         self.messages[index].contextualized_at = Some(now);
 
         if index + 1 < self.messages.len() {

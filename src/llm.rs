@@ -175,16 +175,14 @@ impl Llm  {
         Ok((classifier_id, class_key_id_map))
     }
 
-    pub async fn run_chat(&self, chat: &mut ClassificationChat) -> Result<String> {
+    pub async fn run_chat(&self, chat: &mut ClassificationChat) -> Result<()> {
         let mut messages_remaining = chat.count_empty_assistant_messages();
         while messages_remaining > 0 {
             let chat_messages = chat.in_context_messages();
             let assistant_response = self.api.generate(chat_messages).await?;
-            messages_remaining = chat.push_assistant_content(assistant_response)?;
+            messages_remaining = chat.push_assistant_message(&assistant_response)?;
         }
-        let final_response = chat.last_message()?.content.clone().unwrap();
-
-        Ok(final_response)
+        Ok(())
     }
 
     pub async fn classify(&self, message_id: i64) -> Result<LlmCompletion> {
@@ -213,7 +211,8 @@ impl Llm  {
         )?;
 
         let mut chat = ClassificationChat::new(classify_prompt)?;
-        let final_response = self.run_chat(&mut chat).await?;
+        self.run_chat(&mut chat).await?;
+        let final_response = chat.last_message()?.content.clone();
 
         let classifier_id = Classifier::get_active().await?.unwrap().id;
 
