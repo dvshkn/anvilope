@@ -16,15 +16,7 @@ pub struct Classifier {
     pub created_at: i64,
 }
 
-impl DbTable for Classifier {
-    const DDL: &'static str = "CREATE TABLE classifier (
-        id INTEGER PRIMARY KEY,
-        prompt TEXT NOT NULL,
-        archived_at INTEGER,
-        created_at INTEGER DEFAULT(unixepoch('subsec') * 1000) NOT NULL
-    );
-    CREATE INDEX idx_archived_at ON classifier(archived_at);";
-}
+impl DbTable for Classifier {}
 
 impl From<&Row<'_>> for Classifier {
     fn from(r: &Row) -> Self {

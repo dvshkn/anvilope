@@ -16,15 +16,7 @@ pub struct Meta {
     pub updated_at: i64,
 }
 
-impl DbTable for Meta {
-    const DDL: &'static str = "CREATE TABLE meta (
-        id INTEGER PRIMARY KEY,
-        key TEXT NOT NULL,
-        value TEXT NOT NULL,
-        updated_at INTEGER DEFAULT(unixepoch('subsec') * 1000) NOT NULL,
-        CONSTRAINT key_unique UNIQUE (key)
-    )";
-}
+impl DbTable for Meta {}
 
 impl From<&Row<'_>> for Meta {
     fn from(r: &Row) -> Self {

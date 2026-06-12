@@ -10,12 +10,12 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 
-use super::prompt;
+use super::prompt::ChatMessage;
 
 #[async_trait]
 pub trait InferenceApi: Send + Sync {
     // TODO: switch to chat-oriented flow, return messages instead of string
-    async fn generate(&self, messages: &[prompt::ChatMessage]) -> Result<prompt::ChatMessage>;
+    async fn generate(&self, messages: &[ChatMessage]) -> Result<ChatMessage>;
 }
 
 pub const LLM_RESPONSE_FORMAT_JSON_SCHEMA: &'static str = r#"{
@@ -38,30 +38,9 @@ pub const LLM_RESPONSE_FORMAT_JSON_SCHEMA: &'static str = r#"{
 pub const LLAMA_CPP_DISABLE_THINKING_KWARGS: &'static str = r#"{"enable_thinking": false}"#;
 
 #[derive(Debug, Deserialize)]
-pub struct CompletionMessage {
-    pub role: prompt::ChatRole,
-    pub content: String,
-
-    #[serde(alias="reasoning_content")]
-    pub reasoning: Option<String>,
-}
-
-impl From<&CompletionMessage> for prompt::ChatMessage {
-    fn from(msg: &CompletionMessage) -> Self {
-        prompt::ChatMessage {
-            role: msg.role.clone(),
-            content: msg.content.clone(),
-            reasoning: msg.reasoning.clone(),
-            contextualized_at: None,
-            force_json: false,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
 pub struct CompletionChoice {
     pub index: usize,
-    pub message: CompletionMessage,
+    pub message: ChatMessage,
     pub finish_reason: String,
 }
 
@@ -85,7 +64,7 @@ pub enum CompletionReasoningEffort {
 
 #[derive(Debug, Serialize)]
 pub struct ChatCompletionsRequest<'msgs> {
-    pub messages: &'msgs [prompt::ChatMessage],
+    pub messages: &'msgs [ChatMessage],
     pub model: String,
     pub stream: bool,
     pub temperature: f64,
@@ -128,8 +107,8 @@ pub struct Ollama {
 
 #[async_trait]
 impl InferenceApi for Ollama {
-    async fn generate(&self, messages: &[prompt::ChatMessage]) -> Result<prompt::ChatMessage> {
-        debug!("ollama POST /v1/chat/completions ({} messages)", messages.len());
+    async fn generate(&self, messages: &[ChatMessage]) -> Result<ChatMessage> {
+        debug!("ollama POST /v1/chat/completions ({} prompts)", messages.len());
         trace!("ollama request messages: {:#?}", messages);
 
         let url = format!("{}/v1/chat/completions", self.host);
@@ -172,7 +151,7 @@ impl InferenceApi for Ollama {
             warn!("LLM response was truncated (response_len={})", modeled_res.usage.completion_tokens);
         }
 
-        let new_message = prompt::ChatMessage::from(&modeled_res.choices.get(0).unwrap().message);
+        let new_message = modeled_res.choices.get(0).unwrap().message.clone();
 
         Ok(new_message)
     }
@@ -191,8 +170,8 @@ pub struct LlamaCpp {
 
 #[async_trait]
 impl InferenceApi for LlamaCpp {
-    async fn generate(&self, messages: &[prompt::ChatMessage]) -> Result<prompt::ChatMessage> {
-        debug!("llama.cpp POST /v1/chat/completions ({} messages)", messages.len());
+    async fn generate(&self, messages: &[ChatMessage]) -> Result<ChatMessage> {
+        debug!("llama.cpp POST /v1/chat/completions ({} prompts)", messages.len());
         trace!("llama.cpp request messages: {:#?}", messages);
 
         let url = format!("{}/v1/chat/completions", self.host);
@@ -238,7 +217,7 @@ impl InferenceApi for LlamaCpp {
             warn!("LLM response was truncated (response_len={})", modeled_res.usage.completion_tokens);
         }
 
-        let new_message = prompt::ChatMessage::from(&modeled_res.choices.get(0).unwrap().message);
+        let new_message = modeled_res.choices.get(0).unwrap().message.clone();
 
         Ok(new_message)
     }

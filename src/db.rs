@@ -57,20 +57,6 @@ pub fn ensure_tables() -> Result<()> {
     Ok(())
 }
 
-pub fn create_tables() {
-    let conn = checkout_db_conn!();
-
-    // tables without foreign keys
-    conn.execute(Class::DDL, []).unwrap();
-    conn.execute(Classifier::DDL, []).unwrap();
-    conn.execute(Message::DDL, []).unwrap();
-    conn.execute(Meta::DDL, []).unwrap();
-
-    // tables with foreign keys
-    conn.execute(LlmCompletion::DDL, []).unwrap();
-    conn.execute(LlmJob::DDL, []).unwrap();
-}
-
 pub fn exec_return_first<T, P>(conn: &Connection, statement_str: &str, params: P) -> Result<Option<T>>
 where
     T: DbTable + for<'a> From<&'a Row<'a>>,

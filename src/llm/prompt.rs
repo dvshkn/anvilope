@@ -2,15 +2,16 @@ use anyhow::{
     Error,
     Result,
 };
+use log::{
+    warn,
+};
 use minijinja::context;
-use minijinja::Environment;
 use serde::{
     Deserialize,
     Serialize,
 };
 
 use crate::anvilope_config;
-use crate::llm::inference::CompletionMessage;
 use crate::template_env;
 
 pub const TEMPLATE_EMAIL_MESSAGE: &'static str = r#"
@@ -40,7 +41,7 @@ Response acknowledged. The Anvilope system requires final classifications to be 
 
 pub const MAX_OUTPUT_LEN: usize = 1024; // tokens
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatRole {
     System,
@@ -48,25 +49,21 @@ pub enum ChatRole {
     Assistant,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
+    // inference fields ---
     pub role: ChatRole,
     pub content: String,
 
-    #[serde(skip)]
+    #[serde(alias="reasoning_content", skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
 
+    // harness fields ---
     #[serde(skip)]
     pub contextualized_at: Option<i64>,
 
     #[serde(skip)]
     pub force_json: bool,
-}
-
-impl From<&ChatMessage> for CompletionMessage {
-    fn from(msg: &ChatMessage) -> Self {
-        CompletionMessage { role: msg.role.clone(), content: msg.content.clone(), reasoning: msg.reasoning.clone() }
-    }
 }
 
 pub struct ClassificationChat {
@@ -160,6 +157,11 @@ impl ClassificationChat {
         Ok(message)
     }
 
+    /// returns a serialized copy of all the chat messages
+    pub fn full_trace(&self) -> Result<String> {
+        Ok(serde_json::to_string(&self.messages)?)
+    }
+
     /// returns the number of assistant messages left that need LLM responses
     pub fn count_empty_assistant_messages(&self) -> usize {
         self.messages.iter().filter(|msg| msg.contextualized_at.is_none()).count()
@@ -167,14 +169,18 @@ impl ClassificationChat {
 
     /// sets content for the next empty assistant-role message, returns number
     /// of remaining empty assistant messages
-    pub fn push_assistant_message(&mut self, msg: &ChatMessage) -> Result<usize> {
+    pub fn push_assistant_message(&mut self, msg: ChatMessage) -> Result<usize> {
+        if msg.role != ChatRole::Assistant {
+            warn!("unexpected non-assistant role in message: {:#?}", msg.role);
+        }
+
         let index = self.messages.iter()
             .position(|msg| msg.contextualized_at.is_none())
             .ok_or_else(|| Error::msg("unexpected assistant response"))?;
         let now = chrono::Utc::now().timestamp_millis();
 
-        self.messages[index].content = msg.content.clone();
-        self.messages[index].reasoning = msg.reasoning.clone();
+        self.messages[index].content = msg.content;
+        self.messages[index].reasoning = msg.reasoning;
         self.messages[index].contextualized_at = Some(now);
 
         if index + 1 < self.messages.len() {

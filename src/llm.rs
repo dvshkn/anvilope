@@ -54,31 +54,6 @@ pub struct Llm {
     pub busy: Mutex<bool>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct OllamaGenerateBody {
-    pub prompt: String,
-    pub model: String,
-    pub format: Value,
-    pub raw: bool,
-    pub stream: bool,
-    pub options: OllamaGenerateOptions,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct OllamaGenerateResponse {
-    pub response: String,
-    pub created_at: String,
-    pub prompt_eval_count: usize,
-    pub eval_count: usize,
-}
-
-#[derive(Debug, Serialize)]
-pub struct OllamaGenerateOptions {
-    pub num_ctx: usize,
-    pub num_predict: Option<usize>,
-    pub temperature: f64,
-}
-
 impl Llm  {
     pub async fn new(root_tx: Sender<AnvilopeEvent>) -> Result<Llm> {
         let busy = Mutex::new(false);
@@ -180,7 +155,7 @@ impl Llm  {
         while messages_remaining > 0 {
             let chat_messages = chat.in_context_messages();
             let assistant_response = self.api.generate(chat_messages).await?;
-            messages_remaining = chat.push_assistant_message(&assistant_response)?;
+            messages_remaining = chat.push_assistant_message(assistant_response)?;
         }
         Ok(())
     }
@@ -228,14 +203,13 @@ impl Llm  {
             },
         };
 
-        // TODO: remove when this column is gone
-        let endpoint_response = "n/a".to_string();
+        let full_trace = chat.full_trace()?;
 
         let completion = LlmCompletion::create(
             message_id,
             classifier_id,
             final_response,
-            endpoint_response,
+            full_trace,
             class_id,
             class_key,
         ).await?;

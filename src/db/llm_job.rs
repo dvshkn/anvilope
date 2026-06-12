@@ -16,16 +16,7 @@ pub struct LlmJob {
     pub created_at: i64,
 }
 
-impl DbTable for LlmJob {
-    const DDL: &'static str = "CREATE TABLE llm_job (
-        id INTEGER PRIMARY KEY,
-        message_id INTEGER NOT NULL,
-        status TEXT NOT NULL,
-        created_at INTEGER DEFAULT(unixepoch('subsec') * 1000) NOT NULL,
-        FOREIGN KEY(message_id) REFERENCES message(id)
-    );
-    CREATE INDEX idx_status ON llm_job(status);";
-}
+impl DbTable for LlmJob {}
 
 impl From<&Row<'_>> for LlmJob {
     fn from(r: &Row) -> Self {

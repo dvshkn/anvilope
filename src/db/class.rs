@@ -10,6 +10,7 @@ use serde::{
 };
 
 use crate::checkout_db_conn;
+
 use super::DbTable;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,17 +22,7 @@ pub struct Class {
     pub created_at: i64,
 }
 
-impl DbTable for Class {
-    const DDL: &'static str = "CREATE TABLE class (
-        id INTEGER PRIMARY KEY,
-        key TEXT NOT NULL,
-        prompt TEXT NOT NULL,
-        archived_at INTEGER,
-        created_at INTEGER DEFAULT(unixepoch('subsec') * 1000) NOT NULL
-    );
-    CREATE INDEX idx_key ON class(key);
-    CREATE INDEX idx_archived_at ON class(archived_at);";
-}
+impl DbTable for Class {}
 
 impl From<&Row<'_>> for Class {
     fn from(r: &Row) -> Self {

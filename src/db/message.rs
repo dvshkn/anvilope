@@ -27,23 +27,7 @@ pub struct Message {
     pub created_at: i64,
 }
 
-impl DbTable for Message {
-    const DDL: &'static str = "CREATE TABLE message (
-        id INTEGER PRIMARY KEY,
-        account_key TEXT NOT NULL,
-        class_key TEXT,
-        from_address TEXT NOT NULL,
-        from_name TEXT NOT NULL,
-        subject TEXT NOT NULL,
-        body_plain TEXT NOT NULL,
-        body_html TEXT NOT NULL,
-        uid INTEGER NOT NULL,
-        uid_validity INTEGER NOT NULL,
-        created_at INTEGER DEFAULT(unixepoch('subsec') * 1000) NOT NULL
-    );
-    CREATE INDEX idx_account_key ON message(account_key);
-    CREATE INDEX idx_class_key ON message(class_key);";
-}
+impl DbTable for Message {}
 
 impl From<&Row<'_>> for Message {
     fn from(r: &Row) -> Self {
