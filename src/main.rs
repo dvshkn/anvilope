@@ -165,6 +165,9 @@ async fn cli_serve(_matches: &ArgMatches) -> Result<()> {
                 match event.unwrap() {
                     AnvilopeEvent::AccountDisconnect { account_key, backoff_count } => {
                         info!("account {} disconnected, attempting reconnect...", account_key);
+                        let old_listener = key_listener_map.get(account_key.as_str()).unwrap();
+                        let _ = old_listener.logout().await;
+                        debug!("logout of old connection finished");
                         let acct = anvilope_config!().accounts.iter().find(|a| a._key == account_key).unwrap();
                         if let Ok(new_listener) = ImapSessionManager::new(&acct, tx.clone(), backoff_count).await {
                             let new_listener_ref = Arc::new(new_listener);

@@ -45,3 +45,11 @@ pub enum AnvilopeEvent {
     Noop { account_key: String },
     Error,
 }
+
+#[derive(Debug)]
+pub enum ErrorSeverity<T> {
+    Ok(T),
+    Recoverable(anyhow::Error),
+    Reconnectable(anyhow::Error),
+    Fatal(anyhow::Error),
+}

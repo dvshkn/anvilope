@@ -28,7 +28,7 @@ use std::sync::Arc;
 use stop_token::StopSource;
 use tokio::sync::mpsc::Sender;
 
-use crate::{anvilope_config, AnvilopeEvent};
+use crate::{AnvilopeEvent, ErrorSeverity, anvilope_config};
 use crate::config::Account;
 use crate::db::Message;
 use crate::mail::parse::TextPartMimeType;
@@ -130,6 +130,7 @@ impl ImapSessionManager {
         backoff_count: f32,
         root_tx: Sender<AnvilopeEvent>
     ) -> () {
+        // TODO: remove duplicate error type check once all methods are using triage()
         let mut do_reconnect = false;
         if let Some(io_err) = err.root_cause().downcast_ref::<io::Error>() {
             if io_err.kind() == io::ErrorKind::UnexpectedEof || io_err.kind() == io::ErrorKind::BrokenPipe || io_err.kind() == io::ErrorKind::ConnectionRefused || io_err.kind() == io::ErrorKind::ConnectionReset {
@@ -196,15 +197,19 @@ impl ImapSessionManager {
         tokio::spawn(async move {
             let interrupted = sess_man.clone().interrupt_idle().await;
             let result = sess_man.copy_message_inner(src_mailbox, uid, class_key).await;
-            match result {
-                Ok(_) => {
+            match triage(result) {
+                ErrorSeverity::Ok(_) => {
                     if interrupted {
                         let account_key = sess_man.account_key.to_owned();
                         sess_man.root_tx.send(AnvilopeEvent::AccountIdleTimeout { account_key }).await.unwrap();
                     }
                 }
-                Err(err) => {
-                    error!("copy_message() error: {:#?}", err);
+                ErrorSeverity::Recoverable(err) => {
+                    warn!("copy_message() continuing after error: {:#?}", err);
+
+                }
+                ErrorSeverity::Reconnectable(err) => {
+                    error!("copy_message() attempting reconnect after error: {:#?}", err);
                     Self::spawn_reconnect_handler(
                         &err,
                         sess_man.account_key.to_owned(),
@@ -212,6 +217,10 @@ impl ImapSessionManager {
                         sess_man.backoff_count,
                         sess_man.root_tx.clone(),
                     );
+                }
+                ErrorSeverity::Fatal(err) => {
+                    error!("copy_message() fatal error: {:#?}", err);
+                    panic!();
                 }
             }
         });
@@ -423,5 +432,39 @@ impl ImapSessionManager {
         debug!("wrote message to database id={}", db_record.id);
 
         Ok(AnvilopeEvent::MessageDownloaded { message_id: db_record.id })
+    }
+}
+
+pub fn triage<T>(res: anyhow::Result<T>) -> ErrorSeverity<T> {
+    match res {
+        Ok(thing) => {
+            return ErrorSeverity::Ok(thing);
+        }
+        Err(err) => {
+            if let Some(imap_err) = err.root_cause().downcast_ref::<async_imap::error::Error>() {
+                match imap_err {
+                    async_imap::error::Error::Bad(_) |
+                    async_imap::error::Error::No(_) |
+                    async_imap::error::Error::Validate(_) => {
+                        return ErrorSeverity::Recoverable(err);
+                    }
+                    _ => {}
+                }
+            }
+
+            if let Some(io_err) = err.root_cause().downcast_ref::<io::Error>() {
+                match io_err.kind() {
+                    io::ErrorKind::UnexpectedEof |
+                    io::ErrorKind::BrokenPipe |
+                    io::ErrorKind::ConnectionRefused |
+                    io::ErrorKind::ConnectionReset => {
+                        return ErrorSeverity::Reconnectable(err);
+                    }
+                    _ => {}
+                }
+            }
+
+            return ErrorSeverity::Fatal(err);
+        }
     }
 }
