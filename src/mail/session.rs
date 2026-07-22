@@ -72,18 +72,22 @@ impl ImapSessionManager {
         let connected_at = Utc::now();
         let healthy_at = connected_at + Duration::from_secs_f32(BACKOFF_BASE_SECS * backoff_count.exp2());
 
-        let mut session = match super::connect(&account).await {
-            Ok(session) => session,
-            Err(err) => {
-                error!("new() error: {:#?}", err);
+        let mut session = match triage(super::connect(&account).await) {
+            ErrorSeverity::Ok(session) => session,
+            ErrorSeverity::Recoverable(err) |
+            ErrorSeverity::Reconnectable(err) => {
+                error!("ImapSessionManager::new() error: {:#?}", err);
                 Self::spawn_reconnect_handler(
-                    &err,
                     account._key.to_owned(),
                     healthy_at,
                     backoff_count,
                     root_tx.clone(),
                 );
                 return Err(err);
+            }
+            ErrorSeverity::Fatal(err) => {
+                error!("ImapSessionManager::new() fatal error: {:#?}", err);
+                panic!()
             }
         };
 
@@ -125,65 +129,60 @@ impl ImapSessionManager {
     }
 
     fn spawn_reconnect_handler(
-        err: &Error,
         account_key: String,
         healthy_at: DateTime<Utc>,
         backoff_count: f32,
         root_tx: Sender<AnvilopeEvent>
     ) -> () {
-        // TODO: remove duplicate error type check once all methods are using triage()
-        let mut do_reconnect = false;
-        if let Some(io_err) = err.root_cause().downcast_ref::<io::Error>() {
-            if io_err.kind() == io::ErrorKind::UnexpectedEof || io_err.kind() == io::ErrorKind::BrokenPipe || io_err.kind() == io::ErrorKind::ConnectionRefused || io_err.kind() == io::ErrorKind::ConnectionReset {
-                do_reconnect = true;
+        tokio::spawn(async move {
+            let mut new_backoff = backoff_count;
+            let mut backoff_secs = BACKOFF_BASE_SECS * backoff_count.exp2();
+            if Utc::now() < healthy_at {
+                new_backoff += 1.0;
+                debug!("new backoff value {} for {}", new_backoff, account_key);
+            } else {
+                new_backoff = 0.0;
+                backoff_secs = 0.0;
+                debug!("connection was healthy, backoff value reset for {}", account_key);
             }
-        }
-        if do_reconnect {
-            tokio::spawn(async move {
-                let mut new_backoff = backoff_count;
-                let mut backoff_secs = BACKOFF_BASE_SECS * backoff_count.exp2();
-                if Utc::now() < healthy_at {
-                    new_backoff += 1.0;
-                    debug!("new backoff value {} for {}", new_backoff, account_key);
-                } else {
-                    new_backoff = 0.0;
-                    backoff_secs = 0.0;
-                    debug!("connection was healthy, backoff value reset for {}", account_key);
-                }
 
-                if new_backoff <= MAX_BACKOFF {
-                    debug!("sleeping for {}", backoff_secs);
-                    tokio::time::sleep(Duration::from_secs_f32(backoff_secs)).await;
+            if new_backoff <= MAX_BACKOFF {
+                debug!("sleeping for {}", backoff_secs);
+                tokio::time::sleep(Duration::from_secs_f32(backoff_secs)).await;
 
-                    // signal to recreate ImapSessionManager
-                    let event = AnvilopeEvent::AccountDisconnect {
-                        account_key: account_key.to_owned(),
-                        backoff_count: new_backoff,
-                    };
-                    root_tx.send(event).await.unwrap();
-                } else {
-                    error!("max unhealthy reconnects exceeded for account {}, will not reconnect again", account_key);
-                }
-            });
-        }
+                // signal to recreate ImapSessionManager
+                let event = AnvilopeEvent::AccountDisconnect {
+                    account_key: account_key.to_owned(),
+                    backoff_count: new_backoff,
+                };
+                root_tx.send(event).await.unwrap();
+            } else {
+                error!("max unhealthy reconnects exceeded for account {}, will not reconnect again", account_key);
+            }
+        });
     }
 
     pub fn spawn_listener(sess_man: Arc<ImapSessionManager>) -> () {
         tokio::spawn(async move {
             let result = sess_man.listen_for_messages().await;
-            match result {
-                Ok(event) => {
+            match triage(result) {
+                ErrorSeverity::Ok(event) => {
                     sess_man.root_tx.send(event).await.unwrap();
                 }
-                Err(err) => {
+                ErrorSeverity::Recoverable(err) |
+                ErrorSeverity::Reconnectable(err) => {
+                    // for IDLE treat recoverable and reconnectable the same
                     error!("listen_for_messages() error: {:#?}", err);
                     Self::spawn_reconnect_handler(
-                        &err,
                         sess_man.account_key.to_owned(),
                         sess_man.healthy_at,
                         sess_man.backoff_count,
                         sess_man.root_tx.clone(),
                     );
+                }
+                ErrorSeverity::Fatal(err) => {
+                    error!("listen_for_messages() fatal error: {:#?}", err);
+                    panic!();
                 }
             };
         });
@@ -207,12 +206,14 @@ impl ImapSessionManager {
                 }
                 ErrorSeverity::Recoverable(err) => {
                     warn!("copy_message() continuing after error: {:#?}", err);
-
+                    if interrupted {
+                        let account_key = sess_man.account_key.to_owned();
+                        sess_man.root_tx.send(AnvilopeEvent::AccountIdleTimeout { account_key }).await.unwrap();
+                    }
                 }
                 ErrorSeverity::Reconnectable(err) => {
                     error!("copy_message() attempting reconnect after error: {:#?}", err);
                     Self::spawn_reconnect_handler(
-                        &err,
                         sess_man.account_key.to_owned(),
                         sess_man.healthy_at,
                         sess_man.backoff_count,
@@ -324,20 +325,26 @@ impl ImapSessionManager {
 
     pub async fn download_message(sess_man: Arc<ImapSessionManager>, mailbox: String, ord: u32) -> () {
         let result = sess_man.download_message_inner(&mailbox, &ord).await;
-        match result {
-            Ok(event) => {
+        match triage(result) {
+            ErrorSeverity::Ok(event) => {
                 sess_man.root_tx.send(event).await.unwrap();
             }
-            Err(err) => {
-                // TODO: message likely not downloaded, should be retried
-                error!("download_message() error: {:#?}", err);
+            ErrorSeverity::Recoverable(err) => {
+                // IDLE should already be running, don't need to send new signal
+                warn!("download_message() continuing after error: {:#?}", err);
+            }
+            ErrorSeverity::Reconnectable(err) => {
+                error!("download_message() attempting reconnect after error: {:#?}", err);
                 Self::spawn_reconnect_handler(
-                    &err,
                     sess_man.account_key.to_owned(),
                     sess_man.healthy_at,
                     sess_man.backoff_count,
                     sess_man.root_tx.clone(),
                 );
+            }
+            ErrorSeverity::Fatal(err) => {
+                error!("download_message() fatal error: {:#?}", err);
+                panic!();
             }
         }
     }
