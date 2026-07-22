@@ -118,8 +118,9 @@ impl ImapSessionManager {
 
     pub async fn logout(&self) -> Result<()> {
         let _ = self.interrupt_idle().await;
-        let session_cell = self.session_cell.lock().await;
-        session_cell.take().unwrap().logout().await?;
+        if let Some(mut session) = self.session_cell.lock().await.take() {
+            session.logout().await?;
+        }
         Ok(())
     }
 
