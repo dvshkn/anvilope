@@ -10,8 +10,6 @@ use log::{
     error,
     info,
 };
-use serde::Deserialize;
-use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -48,7 +46,7 @@ pub const LLM_RESPONSE_FORMAT: &'static str = r#"
 
 pub struct Llm {
     pub api: Box<dyn InferenceApi>,
-    pub classifier_id: i64,
+    pub classifier_key_id_map: HashMap<String, i64>,
     pub class_key_id_map: HashMap<String, i64>,
     pub root_tx: Sender<AnvilopeEvent>,
     pub busy: Mutex<bool>,
@@ -78,9 +76,9 @@ impl Llm  {
         };
 
         // make sure database reflects current configuration
-        let (classifier_id, class_key_id_map) = Self::sync_prompts().await?;
+        let (classifier_key_id_map, class_key_id_map) = Self::sync_prompts().await?;
 
-        Ok(Llm { api, classifier_id, class_key_id_map, root_tx, busy })
+        Ok(Llm { api, classifier_key_id_map, class_key_id_map, root_tx, busy })
     }
 
     pub fn spawn(llm_ref: Arc<Llm>) -> () {
@@ -103,51 +101,66 @@ impl Llm  {
     }
 
     /// Iterates through configuration and updates prompt records in the `classifier` and `class`
-    /// database tables. Returns relevant IDs of active entries.
-    pub async fn sync_prompts() -> Result<(i64, HashMap<String, i64>)> {
-        let mut classifier_id: i64;
+    /// database tables. Class keys are namespaced per classifier (eg. "categories.spam").
+    /// Returns maps of classifier key -> classifier db id and namespaced class key -> class db id.
+    pub async fn sync_prompts() -> Result<(HashMap<String, i64>, HashMap<String, i64>)> {
+        let mut classifier_key_id_map: HashMap<String, i64> = HashMap::new();
         let mut class_key_id_map: HashMap<String, i64> = HashMap::new();
 
-        let curr_prompt = anvilope_config!().classifier.prompt.to_owned();
-        if let Some(prev_classifier) = Classifier::get_active().await? {
-            classifier_id = prev_classifier.id;
-            if prev_classifier.prompt != curr_prompt {
-                let new_classifier = Classifier::create(curr_prompt, true).await?;
-                Classifier::set_active(new_classifier.id).await?;
-                classifier_id = new_classifier.id;
-            }
-        } else {
-            let classifier = Classifier::create(curr_prompt, false).await?;
-            classifier_id = classifier.id;
-        }
-
-        // TODO: having both the config and database structs named "Class" isn't great
         let db_classes = Class::get_active().await?;
         let db_key_class_map: HashMap<_, _> = db_classes.iter()
             .map(|c| (c.key.as_str(), c))
             .collect();
-        for cfg_class in anvilope_config!().classes.iter() {
-            let k = cfg_class._key.as_str();
-            if let Some(class) = db_key_class_map.get(k) {
-                class_key_id_map.insert(class.key.to_owned(), class.id);
-                if cfg_class.prompt != class.prompt {
-                    let new_class = Class::create(
-                        k.to_string(),
-                        cfg_class.prompt.to_owned(),
-                        true
-                    ).await?;
-                    class_key_id_map.insert(new_class.key.to_owned(), new_class.id);
+
+        for cfg_classifier in anvilope_config!().classifiers.iter() {
+            let key = cfg_classifier._key.to_owned();
+            let curr_prompt = cfg_classifier.prompt.to_owned();
+
+            // sync classifier prompt record
+            let classifier_id = match Classifier::get_active(&key).await? {
+                Some(prev_classifier) => {
+                    if prev_classifier.prompt != curr_prompt {
+                        let new_classifier = Classifier::create(key.clone(), curr_prompt, true).await?;
+                        new_classifier.id
+                    } else {
+                        prev_classifier.id
+                    }
                 }
-            } else {
-                let class = Class::create(k.to_string(), cfg_class.prompt.to_owned(), true).await?;
-                class_key_id_map.insert(class.key.to_owned(), class.id);
+                None => {
+                    Classifier::create(key.clone(), curr_prompt, false).await?.id
+                }
+            };
+            classifier_key_id_map.insert(key.clone(), classifier_id);
+
+            // sync class prompt records for this classifier
+            for cfg_class in cfg_classifier.classes.iter() {
+                let class_key = cfg_classifier.class_key(&cfg_class._key);
+                if let Some(class) = db_key_class_map.get(class_key.as_str()) {
+                    class_key_id_map.insert(class.key.to_owned(), class.id);
+                    if cfg_class.prompt != class.prompt {
+                        let new_class = Class::create(
+                            class_key.clone(),
+                            cfg_class.prompt.to_owned(),
+                            true
+                        ).await?;
+                        class_key_id_map.insert(new_class.key.to_owned(), new_class.id);
+                    }
+                } else {
+                    let class = Class::create(class_key.clone(), cfg_class.prompt.to_owned(), true).await?;
+                    class_key_id_map.insert(class.key.to_owned(), class.id);
+                }
             }
         }
+
+        // archive any active classifier/class records that are no longer
+        // declared in the configuration
+        let active_classifier_ids: Vec<i64> = classifier_key_id_map.values().cloned().collect();
+        Classifier::set_active(active_classifier_ids).await?;
 
         let active_ids: Vec<i64> = class_key_id_map.values().cloned().collect();
         Class::set_active(active_ids).await?;
 
-        Ok((classifier_id, class_key_id_map))
+        Ok((classifier_key_id_map, class_key_id_map))
     }
 
     pub async fn run_chat(&self, chat: &mut ClassificationChat) -> Result<()> {
@@ -160,65 +173,83 @@ impl Llm  {
         Ok(())
     }
 
-    pub async fn classify(&self, message_id: i64) -> Result<LlmCompletion> {
+    /// Classifies a message with every classifier declared for the message's account.
+    /// Returns one completion per classifier that ran.
+    pub async fn classify(&self, message_id: i64) -> Result<Vec<LlmCompletion>> {
         let message = Message::get(message_id).await?
             .ok_or(Error::msg("message not found in db"))?;
 
-        //
-        // decide whether to read plain text or HTML content
-        //
-        // TODO: add config flag to prefer plain text
-        let mut body = "(body content could not be decoded)".to_string();
-        if message.body_html.len() > 0 {
-            // TODO: add config flag to allow for raw HTML
-            if let Ok(body_md) = parse::html_to_markdown(&message.body_html) {
-                body = body_md;
+        let account = anvilope_config!().accounts.iter()
+            .find(|a| a._key == message.account_key)
+            .ok_or(Error::msg("message account not found in config"))?;
+
+        let mut completions: Vec<LlmCompletion> = Vec::new();
+        for classifier_key in account.classifiers.iter() {
+            let classifier = anvilope_config!().classifiers.iter()
+                .find(|c| &c._key == classifier_key)
+                .ok_or(Error::msg("account references unknown classifier"))?;
+
+            //
+            // decide whether to read plain text or HTML content
+            //
+            // TODO: add config flag to prefer plain text
+            let mut body = "(body content could not be decoded)".to_string();
+            if message.body_html.len() > 0 {
+                // TODO: add config flag to allow for raw HTML
+                if let Ok(body_md) = parse::html_to_markdown(&message.body_html) {
+                    body = body_md;
+                }
+            } else if message.body_plain.len() > 0 {
+                body = message.body_plain.clone();
             }
-        } else if message.body_plain.len() > 0 {
-            body = message.body_plain;
+
+            let classify_prompt = prompt::assemble_prompt(
+                classifier,
+                &message.from_address,
+                &message.from_name,
+                &message.subject,
+                &body,
+            )?;
+
+            let mut chat = ClassificationChat::new(classify_prompt)?;
+            self.run_chat(&mut chat).await?;
+            let final_response = chat.last_message()?.content.clone();
+
+            let classifier_id = *self.classifier_key_id_map.get(classifier_key)
+                .ok_or(Error::msg("classifier id not found in db sync map"))?;
+
+            let mut class_id: Option<i64> = None;
+            let mut class_key: Option<String> = None;
+            match self.process_llm_response(classifier_key, &final_response).await {
+                Ok((id, key)) => {
+                    class_id = Some(id);
+                    class_key = Some(key);
+                },
+                Err(e) => {
+                    error!("process_llm_response: {:#?}", e);
+                },
+            };
+
+            let full_trace = chat.full_trace()?;
+
+            let completion = LlmCompletion::create(
+                message_id,
+                classifier_id,
+                final_response,
+                full_trace,
+                class_id,
+                class_key,
+            ).await?;
+
+            completions.push(completion);
         }
 
-        let classify_prompt = prompt::assemble_prompt(
-            &message.from_address,
-            &message.from_name,
-            &message.subject,
-            &body,
-        )?;
-
-        let mut chat = ClassificationChat::new(classify_prompt)?;
-        self.run_chat(&mut chat).await?;
-        let final_response = chat.last_message()?.content.clone();
-
-        let classifier_id = Classifier::get_active().await?.unwrap().id;
-
-        let mut class_id: Option<i64> = None;
-        let mut class_key: Option<String> = None;
-        match self.process_llm_response(&final_response).await {
-            Ok((id, key)) => {
-                class_id = Some(id);
-                class_key = Some(key);
-            },
-            Err(e) => {
-                error!("process_llm_response: {:#?}", e);
-            },
-        };
-
-        let full_trace = chat.full_trace()?;
-
-        let completion = LlmCompletion::create(
-            message_id,
-            classifier_id,
-            final_response,
-            full_trace,
-            class_id,
-            class_key,
-        ).await?;
-
-        Ok(completion)
+        Ok(completions)
     }
 
-    /// Takes the LLM response and attempts to cleanly extract the chosen class.
-    pub async fn process_llm_response(&self, llm_response: &String) -> Result<(i64, String)> {
+    /// Takes the LLM response for a particular classifier and attempts to
+    /// cleanly extract the chosen class.
+    pub async fn process_llm_response(&self, classifier_key: &String, llm_response: &String) -> Result<(i64, String)> {
         // TODO: make custom llm error type
         let obj: Value = serde_json::from_str(llm_response.as_str())
             .map_err(|_| Error::msg("LLM response not valid JSON"))?;
@@ -230,8 +261,9 @@ impl Llm  {
         let class_v = obj[class_k].as_str()
             .ok_or(Error::msg("LLM repsonse contains unexpected type for \"class\" property"))?;
 
+        let expected_key = format!("{}.{}", classifier_key, class_v);
         for (key, id) in self.class_key_id_map.iter() {
-            if key.to_lowercase() == class_v.to_lowercase() {
+            if key.to_lowercase() == expected_key.to_lowercase() {
                 return Ok((id.to_owned(), key.to_owned()));
             }
         }
@@ -248,20 +280,22 @@ impl Llm  {
             };
 
             info!("sending message_id={} to LLM", job.message_id);
-            let completion_result = self.classify(job.message_id).await;
+            let completions_result = self.classify(job.message_id).await;
 
             let mut job_failed = true;
-            if let Ok(completion) = completion_result {
-                if let Some(class_key) = completion.class_key {
-                    let message_id = completion.message_id;
-                    LlmJob::set_status(job.id, LlmJob::JOB_STATE_COMPLETED).await?;
-                    self.root_tx.send(AnvilopeEvent::MessageClassified {
-                        message_id,
-                        class_key,
-                    }).await?;
-                    job_failed = false;
+            if let Ok(completions) = completions_result {
+                for completion in completions {
+                    if let Some(class_key) = completion.class_key {
+                        let message_id = completion.message_id;
+                        LlmJob::set_status(job.id, LlmJob::JOB_STATE_COMPLETED).await?;
+                        self.root_tx.send(AnvilopeEvent::MessageClassified {
+                            message_id,
+                            class_key,
+                        }).await?;
+                        job_failed = false;
+                    }
                 }
-            } else if let Err(e) = completion_result {
+            } else if let Err(e) = completions_result {
                 error!("classify: {:#?}", e);
             }
             if job_failed {

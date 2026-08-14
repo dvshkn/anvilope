@@ -28,7 +28,7 @@ use std::sync::Arc;
 use stop_token::StopSource;
 use tokio::sync::mpsc::Sender;
 
-use crate::{AnvilopeEvent, ErrorSeverity, anvilope_config};
+use crate::{AnvilopeEvent, ErrorSeverity};
 use crate::config::Account;
 use crate::db::Message;
 use crate::mail::parse::TextPartMimeType;
@@ -192,11 +192,11 @@ impl ImapSessionManager {
         sess_man: Arc<ImapSessionManager>,
         src_mailbox: String,
         uid: u32,
-        class_key: String,
+        dest_folder: String,
     ) -> () {
         tokio::spawn(async move {
             let interrupted = sess_man.clone().interrupt_idle().await;
-            let result = sess_man.copy_message_inner(src_mailbox, uid, class_key).await;
+            let result = sess_man.copy_message_inner(src_mailbox, uid, dest_folder).await;
             match triage(result) {
                 ErrorSeverity::Ok(_) => {
                     if interrupted {
@@ -228,16 +228,14 @@ impl ImapSessionManager {
         });
     }
 
-    async fn copy_message_inner(&self, src_mailbox: String, uid: u32, class_key: String) -> Result<()> {
+    async fn copy_message_inner(&self, src_mailbox: String, uid: u32, dest_folder: String) -> Result<()> {
         let session_cell = self.session_cell.lock().await;
         let mut session = session_cell.take().unwrap();
 
-        let class = anvilope_config!().classes.iter().find(|c| c._key == class_key).unwrap();
-        let dest_folder = class.labels.get(&self.account_key).unwrap();
-        debug!("class_key = {}, {} -> {}", class_key, src_mailbox, dest_folder);
+        debug!("{} -> {}", src_mailbox, dest_folder);
 
         // check for destination folder
-        let ls_res = session.list(None, Some(dest_folder))
+        let ls_res = session.list(None, Some(dest_folder.as_str()))
             .await?
             .collect::<Vec<_>>()
             .await;

@@ -7,6 +7,7 @@ use clap::{
     Command
 };
 use config::{
+    Action,
     AnvilopeConfig,
     RunMode,
 };
@@ -35,7 +36,10 @@ fn init_config() {
     crate::ANVILOPE_CONFIG.get_or_init(|| AnvilopeConfig::new(RunMode::Production));
     crate::TEMPLATE_ENV.get_or_init(|| {
         let mut template_env = minijinja::Environment::new();
-        template_env.add_template("classifier", anvilope_config!().classifier.prompt.as_str()).unwrap();
+        for classifier in anvilope_config!().classifiers.iter() {
+            let template_name = format!("classifier.{}", classifier._key);
+            template_env.add_template_owned(template_name, classifier.prompt.to_owned()).unwrap();
+        }
         template_env.add_template("classes", llm::prompt::TEMPLATE_CLASSES).unwrap();
         template_env.add_template("email_message", llm::prompt::TEMPLATE_EMAIL_MESSAGE).unwrap();
         template_env.add_template("system_prompt", llm::prompt::TEMPLATE_SYSTEM).unwrap();
@@ -196,15 +200,25 @@ async fn cli_serve(_matches: &ArgMatches) -> Result<()> {
                         info!("message classified event");
                         info!("updating class of message_id={} to \"{}\"", message_id, class_key);
                         let message = Message::set_class(message_id, &class_key).await?.unwrap();
-                        let account_key = message.account_key;
-                        let listener = key_listener_map.get(account_key.as_str()).unwrap().clone();
-                        let mailbox = "INBOX".to_string(); // TODO
-                        ImapSessionManager::spawn_interrupt_copy_message(
-                            listener,
-                            mailbox,
-                            message.uid,
-                            class_key,
-                        );
+                        let account = anvilope_config!().accounts.iter()
+                            .find(|a| a._key == message.account_key)
+                            .expect("message account not present in config");
+                        let listener = key_listener_map.get(account._key.as_str()).unwrap().clone();
+                        for action in account.actions.iter() {
+                            if action.if_class() != class_key.as_str() {
+                                continue;
+                            }
+                            match action {
+                                Action::Label { name, .. } => {
+                                    ImapSessionManager::spawn_interrupt_copy_message(
+                                        listener.clone(),
+                                        "INBOX".to_string(), // TODO
+                                        message.uid,
+                                        name.to_owned(),
+                                    );
+                                }
+                            }
+                        }
                     }
                     AnvilopeEvent::Noop { account_key } => {
                         debug!("no-op event {}", account_key);

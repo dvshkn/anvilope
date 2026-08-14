@@ -14,7 +14,9 @@ use serde::{
     Deserialize,
     Serialize,
 };
-use std::collections::HashMap;
+use std::collections::{
+    HashSet,
+};
 use std::fs::File;
 use std::io::prelude::Read;
 use std::path::PathBuf;
@@ -40,8 +42,7 @@ pub struct AnvilopeConfig {
     pub tls_client_config: Arc<ClientConfig>,
     pub llm: Llm,
     pub accounts: Vec<Account>,
-    pub classifier: Classifier,
-    pub classes: Vec<Class>,
+    pub classifiers: Vec<Classifier>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -67,21 +68,55 @@ pub struct Account {
 
     #[serde(default = "Account::default_use_tls")]
     pub use_tls: bool,
+
+    /// Classifiers to run on incoming messages for this account.
+    /// A message is sent to every classifier listed here. Required: the
+    /// [accounts] validation step will reject an account that does not
+    /// declare at least one classifier.
+    #[serde(default)]
+    pub classifiers: Vec<String>,
+
+    /// Actions to perform once a message has been classified. Each action
+    /// triggers when the (namespaced) class of a message matches its
+    /// `if_class` value.
+    #[serde(default)]
+    pub actions: Vec<Action>,
+}
+
+/// A configurable action executed on classified messages.
+///
+/// New action types can be added as additional variants of this enum.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Action {
+    /// Copy the message into the IMAP folder with the given name.
+    Label {
+        name: String,
+        if_class: String,
+    },
+}
+
+impl Action {
+    /// Returns the namespaced class key (eg. "categories.spam") that
+    /// triggers this action.
+    pub fn if_class(&self) -> &str {
+        match self {
+            Action::Label { if_class, .. } => if_class,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
 pub struct Classifier {
-    pub _db_id: Option<i64>,
+    pub _key: String,
     pub prompt: String,
-    pub script: Option<String>,
+    pub classes: Vec<Class>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Class {
     pub _key: String,
-    pub _db_id: Option<i64>,
     pub prompt: String,
-    pub labels: HashMap<String, String>,
 }
 
 impl Llm {
@@ -111,16 +146,10 @@ impl Account {
 }
 
 impl Classifier {
-    pub fn set_db_id(&mut self, id: i64) -> Result<()> {
-        self._db_id = Some(id);
-        Ok(())
-    }
-}
-
-impl Class {
-    pub fn set_db_id(&mut self, id: i64) -> Result<()> {
-        self._db_id = Some(id);
-        Ok(())
+    /// Returns the namespaced key of one of this classifier's classes
+    /// (eg. "categories.spam" for classifier "categories" and class "spam").
+    pub fn class_key(&self, class_key: &str) -> String {
+        format!("{}.{}", self._key, class_key)
     }
 }
 
@@ -153,15 +182,15 @@ impl AnvilopeConfig {
             .expect("cannot parse [llm] section of config");
         let accounts = Self::parse_accounts_section(&root_config)
             .expect("cannot parse [accounts] section of config");
-        let mut classifier = Self::parse_classifier_section(&root_config)
-            .expect("cannot parse [classifier] section of config");
-        let mut classes = Self::parse_classes_section(&root_config, &accounts)
-            .expect("cannot parse [classes] section of config");
+        let mut classifiers = Self::parse_classifiers_section(&root_config)
+            .expect("cannot parse [classifiers] section of config");
 
         // some hygiene
-        classifier.prompt = classifier.prompt.trim().to_string();
-        for c in classes.iter_mut() {
-            c.prompt = c.prompt.trim().to_string();
+        for classifier in classifiers.iter_mut() {
+            classifier.prompt = classifier.prompt.trim().to_string();
+            for class in classifier.classes.iter_mut() {
+                class.prompt = class.prompt.trim().to_string();
+            }
         }
 
         // setup TLS
@@ -175,8 +204,7 @@ impl AnvilopeConfig {
             tls_client_config,
             llm,
             accounts,
-            classifier,
-            classes,
+            classifiers,
         };
     }
 
@@ -213,21 +241,63 @@ impl AnvilopeConfig {
             }
         }
 
-        // check prompt template
+        // check classifier prompt templates
         let re_classes = Regex::new(r"\{\{\s*classes\s*\}\}")?;
         let re_email = Regex::new(r"\{\{\s*email_message\s*\}\}")?;
-        if !re_classes.is_match(self.classifier.prompt.as_str()) {
-            error!("classifier prompt lacks a \"{{{{ classes }}}}\" variable");
+        if self.classifiers.len() < 1 {
+            error!("no classifiers configured!");
             error = true;
         }
-        if !re_email.is_match(self.classifier.prompt.as_str()) {
-            error!("classifier prompt lacks a \"{{{{ email_message }}}}\" variable");
-            error = true;
+        for classifier in self.classifiers.iter() {
+            if !re_classes.is_match(classifier.prompt.as_str()) {
+                error!("classifier \"{}\" prompt lacks a \"{{{{ classes }}}}\" variable", classifier._key);
+                error = true;
+            }
+            if !re_email.is_match(classifier.prompt.as_str()) {
+                error!("classifier \"{}\" prompt lacks a \"{{{{ email_message }}}}\" variable", classifier._key);
+                error = true;
+            }
+            if classifier.classes.len() < 1 {
+                error!("classifier \"{}\" has no classes configured!", classifier._key);
+                error = true;
+            }
         }
 
-        if self.classes.len() < 1 {
-            error!("no classes configured!");
-            error = true;
+        // build set of valid namespaced class keys
+        let mut valid_class_keys: HashSet<String> = HashSet::new();
+        for classifier in self.classifiers.iter() {
+            for class in classifier.classes.iter() {
+                valid_class_keys.insert(classifier.class_key(&class._key));
+            }
+        }
+
+        // check accounts reference valid classifiers and actions
+        for acct in self.accounts.iter() {
+            if acct.classifiers.is_empty() {
+                error!("account \"{}\" does not declare any classifiers (classifiers = [...])", acct._key);
+                error = true;
+            }
+            for classifier_key in acct.classifiers.iter() {
+                if !self.classifiers.iter().any(|c| &c._key == classifier_key) {
+                    error!("account \"{}\" references unknown classifier \"{}\"", acct._key, classifier_key);
+                    error = true;
+                }
+            }
+            for action in acct.actions.iter() {
+                let if_class = action.if_class();
+                if !valid_class_keys.contains(if_class) {
+                    error!("account \"{}\" action references unknown class \"{}\"", acct._key, if_class);
+                    error = true;
+                }
+                match action {
+                    Action::Label { name, .. } => {
+                        if name.is_empty() {
+                            error!("account \"{}\" label action has an empty folder name", acct._key);
+                            error = true;
+                        }
+                    }
+                }
+            }
         }
 
         if error {
@@ -279,53 +349,45 @@ impl AnvilopeConfig {
         Ok(accounts)
     }
 
-    fn parse_classifier_section(root: &Map<String, Value>) -> Result<Classifier> {
-        let section = root.get("classifier")
-            .ok_or(anyhow!("required [classifier] section is missing"))?;
-        let classifier = section.as_table()
-            .ok_or(anyhow!("malformed [classifier] section"))?
-            .to_owned()
-            .try_into()?;
+    fn parse_classifiers_section(root: &Map<String, Value>) -> Result<Vec<Classifier>> {
+        let section = root.get("classifiers")
+            .ok_or(anyhow!("required [classifiers] section is missing"))?;
+        let table = section.as_table()
+            .ok_or(anyhow!("malformed [classifiers] section"))?;
 
-        Ok(classifier)
-    }
+        let mut classifiers: Vec<Classifier> = Vec::new();
+        for k in table.keys() {
+            let classifier_map = table[k].as_table()
+                .ok_or(anyhow!("malformed classifier entry: {}", k))?;
 
-    fn parse_classes_section(root: &Map<String, Value>, accounts: &Vec<Account>) -> Result<Vec<Class>> {
-        let section = root.get("classes")
-            .ok_or(anyhow!("required [classes] section is missing"))?;
-        let keys = section.as_table()
-            .ok_or(anyhow!("required [classes] section is malformed"))?
-            .keys();
+            let prompt = classifier_map.get("prompt")
+                .ok_or(anyhow!("classifier \"{}\" is missing a prompt", k))?
+                .as_str()
+                .ok_or(anyhow!("classifier \"{}\" prompt is not a string", k))?
+                .to_string();
 
-        let mut classes: Vec<Class> = Vec::new();
-        for k in keys {
-            let class_map = section[k].as_table()
-                .ok_or(anyhow!("malformed class entry: {}", k))?
-                .to_owned();
-
-            let _key = k.to_owned();
-            let prompt = class_map.get("prompt").unwrap().as_str().unwrap().to_string();
-            let mut labels: HashMap<String, String> = HashMap::new();
-
-            // labels are optional, default to account key string
-            for acct in accounts {
-                labels.insert(acct._key.to_owned(), acct._key.to_owned());
-            }
-            if let Some(src_labels_value) = class_map.get("labels") {
-                let src_labels_map = src_labels_value.as_table().unwrap();
-                for (k, v) in src_labels_map.iter() {
-                    labels.insert(k.to_owned(), v.as_str().unwrap().to_owned());
+            let mut classes: Vec<Class> = Vec::new();
+            if let Some(classes_value) = classifier_map.get("classes") {
+                let classes_table = classes_value.as_table()
+                    .ok_or(anyhow!("malformed classes for classifier \"{}\"", k))?;
+                for (class_key, class_value) in classes_table.iter() {
+                    let class_prompt = class_value.as_str()
+                        .ok_or(anyhow!("class \"{}\" in classifier \"{}\" is not a string", class_key, k))?
+                        .to_string();
+                    classes.push(Class {
+                        _key: class_key.to_owned(),
+                        prompt: class_prompt,
+                    });
                 }
             }
 
-            classes.push(Class {
-                _key,
-                _db_id: None,
+            classifiers.push(Classifier {
+                _key: k.to_owned(),
                 prompt,
-                labels,
+                classes,
             });
         }
 
-        Ok(classes)
+        Ok(classifiers)
     }
 }

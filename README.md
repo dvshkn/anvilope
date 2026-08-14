@@ -77,9 +77,35 @@ Changes will need to be made for:
   use in the LLM section
 + The IMAP account information in the accounts section
 + Optionally, the IMAP account name to something more fitting than "greenmail"
-+ Optionally, the main `prompt` template in the classifier section
-+ Optionally, the individual classes and each `prompt` in the classes section
-+ Optionally, what label to assign emails in each class (Note: labels are IMAP folders)
++ Optionally, the `prompt` template of each classifier in the classifiers section
++ Optionally, the individual classes (and each class `prompt`) nested under each
+  classifier
++ Optionally, which classifiers to run per account and what `actions` to perform
+  on classified messages (Note: label actions copy messages into IMAP folders)
+
+#### Classifiers and Actions
+
+Anvilope supports any number of named classifiers. Each classifier defines a
+`prompt` template and its own set of classes. Class keys are namespaced per
+classifier, eg. the class `spam` of classifier `categories` is referenced as
+`categories.spam`.
+
+Each IMAP account declares which classifiers should run on its incoming
+messages:
+```
+[accounts]
+gmail.classifiers = ["categories"]
+```
+
+When a message has been classified, Anvilope executes the account's `actions`
+whose `if_class` matches the message's (namespaced) class. Actions are typed
+and currently only `label` is supported (which copies the message into the
+named IMAP folder):
+```
+gmail.actions = [
+	{ type="label", name="my_spam_folder", if_class="categories.spam" }
+]
+```
 
 #### IMAP Credentials
 If credentials for an IMAP account are not specified in the configuration file

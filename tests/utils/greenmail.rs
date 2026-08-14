@@ -56,11 +56,13 @@ pub async fn init() -> Result<()> {
         .await?
         .error_for_status()?;
 
-    // create folders
+    // create folders declared in the account's label actions
     let account = anvilope_config!().accounts.first().unwrap();
     let mut session = mail::connect(&account).await?;
-    session.create("anv_personal").await?;
-    session.create("anv_marketing").await?;
+    for action in account.actions.iter() {
+        let config::Action::Label { name, .. } = action;
+        session.create(name).await?;
+    }
 
     Ok(())
 }

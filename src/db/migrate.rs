@@ -16,6 +16,7 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     let mut migrations = [
         (1, migrate_001_baptize as MigrationFn),
         (2, migrate_002_add_trace_column as MigrationFn),
+        (3, migrate_003_add_classifier_key as MigrationFn),
     ];
     migrations.sort_by_key(|tup| tup.0);
 
@@ -93,6 +94,12 @@ pub fn exec_sql_string(conn: &Connection, statements: &str) -> Result<usize> {
 
 fn migrate_002_add_trace_column(conn: &Connection) -> Result<()> {
     let contents = include_str!("../../migrations/migrate_002.sql");
+    let _ = exec_sql_string(conn, contents)?;
+    Ok(())
+}
+
+fn migrate_003_add_classifier_key(conn: &Connection) -> Result<()> {
+    let contents = include_str!("../../migrations/migrate_003.sql");
     let _ = exec_sql_string(conn, contents)?;
     Ok(())
 }
