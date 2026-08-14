@@ -1,0 +1,36 @@
+[llm]
+ollama_host = "http://127.0.0.1:11434"
+model = "gemma4:e4b"
+context_length = 32768
+
+[accounts]
+gmail.host = "imap.gmail.com"
+gmail.port = 993
+gmail.username = "example_user@gmail.com"
+gmail.password = "example_password_1234"
+
+[classifier]
+prompt = """
+<instructions>
+Classify the email message into one of the pre-defined classes enclosed within <classes></classes> tags. Respond in JSON format with a single object containing "reasoning" and "class" properties. Respond with the reasoning before the classification determination.
+</instructions>
+
+<classes>
+{{ classes }}
+</classes>
+
+{{ email_message }}
+"""
+
+[classes]
+personal.prompt = """
+These are correspondence emails written by individuals targeted directly to the
+recipient
+"""
+personal.labels.gmail = "anv:personal"
+
+spam.prompt = """
+These are mass produced emails either trying to sell/advertise services or
+deceive the recipient about services they might already be using
+"""
+spam.labels.gmail = "anv:spam"

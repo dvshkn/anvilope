@@ -12,6 +12,7 @@ use serde::{
 };
 
 use crate::anvilope_config;
+use crate::config::Classifier;
 use crate::template_env;
 
 pub const TEMPLATE_EMAIL_MESSAGE: &'static str = r#"
@@ -21,8 +22,8 @@ Subject: {{ subject }}
 "#;
 
 pub const TEMPLATE_CLASSES: &'static str = r#"
-{% for c in classes %}
-{{ c._key }}: {{ c.prompt }}
+{% for name, prompt in classes %}
+{{ name }}: {{ prompt }}
 {% endfor %}
 "#;
 
@@ -193,12 +194,13 @@ impl ClassificationChat {
 
 // Returns a complete prompt that can be submitted to the LLM
 pub fn assemble_prompt(
+    classifier: &Classifier,
     from_address: &String,
     from_name: &String,
     subject: &String,
     body: &String) -> Result<String> {
 
-    let inst_template = inst_template()?;
+    let inst_template = inst_template(classifier)?;
     let message_max_len = message_max_len(&inst_template);
     let mut message_string = template_env!().get_template("email_message")?
         .render(context! {
@@ -217,10 +219,11 @@ pub fn assemble_prompt(
 
 /// Returns a template for an almost complete prompt that does not include the
 /// email message content
-fn inst_template() -> Result<String> {
+fn inst_template(classifier: &Classifier) -> Result<String> {
     let classes = template_env!().get_template("classes")?
-        .render(context! { classes => anvilope_config!().classes })?;
-    let instructions = template_env!().get_template("classifier")?
+        .render(context! { classes => &classifier.classes })?;
+    let instructions = template_env!()
+        .get_template(&format!("classifier.{}", classifier._key))?
         .render(context! {
             email_message => "{{ email_message }}", // no-op
             classes => classes.trim(),

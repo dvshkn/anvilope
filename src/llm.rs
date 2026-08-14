@@ -10,8 +10,6 @@ use log::{
     error,
     info,
 };
-use serde::Deserialize;
-use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -46,10 +44,17 @@ pub const LLM_RESPONSE_FORMAT: &'static str = r#"
 }
 "#;
 
+// database state for one classifier: its active row id and a map of
+// plain class name -> active class row id
+#[derive(Debug)]
+pub struct ClassifierState {
+    pub id: i64,
+    pub class_key_id_map: HashMap<String, i64>,
+}
+
 pub struct Llm {
     pub api: Box<dyn InferenceApi>,
-    pub classifier_id: i64,
-    pub class_key_id_map: HashMap<String, i64>,
+    pub classifiers: HashMap<String, ClassifierState>,
     pub root_tx: Sender<AnvilopeEvent>,
     pub busy: Mutex<bool>,
 }
@@ -78,9 +83,9 @@ impl Llm  {
         };
 
         // make sure database reflects current configuration
-        let (classifier_id, class_key_id_map) = Self::sync_prompts().await?;
+        let classifiers = Self::sync_prompts().await?;
 
-        Ok(Llm { api, classifier_id, class_key_id_map, root_tx, busy })
+        Ok(Llm { api, classifiers, root_tx, busy })
     }
 
     pub fn spawn(llm_ref: Arc<Llm>) -> () {
@@ -103,51 +108,108 @@ impl Llm  {
     }
 
     /// Iterates through configuration and updates prompt records in the `classifier` and `class`
-    /// database tables. Returns relevant IDs of active entries.
-    pub async fn sync_prompts() -> Result<(i64, HashMap<String, i64>)> {
-        let mut classifier_id: i64;
-        let mut class_key_id_map: HashMap<String, i64> = HashMap::new();
+    /// database tables. Returns the active database state for each configured classifier, keyed
+    /// by classifier name.
+    pub async fn sync_prompts() -> Result<HashMap<String, ClassifierState>> {
+        let mut result: HashMap<String, ClassifierState> = HashMap::new();
 
-        let curr_prompt = anvilope_config!().classifier.prompt.to_owned();
-        if let Some(prev_classifier) = Classifier::get_active().await? {
-            classifier_id = prev_classifier.id;
-            if prev_classifier.prompt != curr_prompt {
-                let new_classifier = Classifier::create(curr_prompt, true).await?;
-                Classifier::set_active(new_classifier.id).await?;
-                classifier_id = new_classifier.id;
+        // active db classifiers, keyed by name (highest id wins on duplicates)
+        let db_classifiers = Classifier::get_active().await?;
+        let mut db_cf_map: HashMap<String, &Classifier> = HashMap::new();
+        for db_cf in db_classifiers.iter() {
+            match db_cf_map.get(db_cf.key.as_str()) {
+                Some(existing) if existing.id >= db_cf.id => {},
+                _ => { db_cf_map.insert(db_cf.key.to_owned(), db_cf); },
             }
-        } else {
-            let classifier = Classifier::create(curr_prompt, false).await?;
-            classifier_id = classifier.id;
         }
 
-        // TODO: having both the config and database structs named "Class" isn't great
         let db_classes = Class::get_active().await?;
-        let db_key_class_map: HashMap<_, _> = db_classes.iter()
-            .map(|c| (c.key.as_str(), c))
-            .collect();
-        for cfg_class in anvilope_config!().classes.iter() {
-            let k = cfg_class._key.as_str();
-            if let Some(class) = db_key_class_map.get(k) {
-                class_key_id_map.insert(class.key.to_owned(), class.id);
-                if cfg_class.prompt != class.prompt {
-                    let new_class = Class::create(
-                        k.to_string(),
-                        cfg_class.prompt.to_owned(),
-                        true
+
+        for cfg_cf in anvilope_config!().classifiers.iter() {
+            let cf_key = cfg_cf._key.as_str();
+
+            // ensure an active classifier row exists for this config entry
+            let cf_id: i64;
+            match db_cf_map.get(cf_key) {
+                Some(db_cf) if db_cf.prompt == cfg_cf.prompt => {
+                    cf_id = db_cf.id;
+                },
+                Some(db_cf) => {
+                    let new_cf = Classifier::create(
+                        cf_key.to_string(),
+                        cfg_cf.prompt.to_owned(),
+                        false
                     ).await?;
-                    class_key_id_map.insert(new_class.key.to_owned(), new_class.id);
+                    archive_classifier_and_classes(db_cf.id, &db_classes).await?;
+                    cf_id = new_cf.id;
+                },
+                None => {
+                    let new_cf = Classifier::create(
+                        cf_key.to_string(),
+                        cfg_cf.prompt.to_owned(),
+                        false
+                    ).await?;
+                    cf_id = new_cf.id;
+                },
+            }
+
+            // active class rows for this classifier, keyed by class name
+            let mut db_class_map: HashMap<&str, &Class> = HashMap::new();
+            for db_class in db_classes.iter().filter(|c| c.classifier_id == cf_id) {
+                match db_class_map.get(db_class.key.as_str()) {
+                    Some(existing) if existing.id >= db_class.id => {},
+                    _ => { db_class_map.insert(db_class.key.as_str(), db_class); },
                 }
-            } else {
-                let class = Class::create(k.to_string(), cfg_class.prompt.to_owned(), true).await?;
-                class_key_id_map.insert(class.key.to_owned(), class.id);
+            }
+
+            let mut class_key_id_map: HashMap<String, i64> = HashMap::new();
+            for (class_key, class_prompt) in cfg_cf.classes.iter() {
+                match db_class_map.get(class_key.as_str()) {
+                    Some(db_class) if db_class.prompt == *class_prompt => {
+                        class_key_id_map.insert(class_key.to_owned(), db_class.id);
+                    },
+                    Some(db_class) => {
+                        let new_class = Class::create(
+                            cf_id,
+                            class_key.to_owned(),
+                            class_prompt.to_owned(),
+                            false
+                        ).await?;
+                        Class::archive(db_class.id).await?;
+                        class_key_id_map.insert(class_key.to_owned(), new_class.id);
+                    },
+                    None => {
+                        let new_class = Class::create(
+                            cf_id,
+                            class_key.to_owned(),
+                            class_prompt.to_owned(),
+                            false
+                        ).await?;
+                        class_key_id_map.insert(class_key.to_owned(), new_class.id);
+                    },
+                }
+            }
+
+            // archive classes for this classifier that are no longer in config
+            for (class_key, db_class) in db_class_map.iter() {
+                if !cfg_cf.classes.contains_key(*class_key) {
+                    Class::archive(db_class.id).await?;
+                }
+            }
+
+            result.insert(cf_key.to_owned(), ClassifierState { id: cf_id, class_key_id_map });
+        }
+
+        // archive classifiers that are no longer in config
+        for (cf_key, db_cf) in db_cf_map.iter() {
+            let still_configured = anvilope_config!().classifiers.iter()
+                .any(|c| c._key == *cf_key);
+            if !still_configured {
+                archive_classifier_and_classes(db_cf.id, &db_classes).await?;
             }
         }
 
-        let active_ids: Vec<i64> = class_key_id_map.values().cloned().collect();
-        Class::set_active(active_ids).await?;
-
-        Ok((classifier_id, class_key_id_map))
+        Ok(result)
     }
 
     pub async fn run_chat(&self, chat: &mut ClassificationChat) -> Result<()> {
@@ -160,9 +222,15 @@ impl Llm  {
         Ok(())
     }
 
-    pub async fn classify(&self, message_id: i64) -> Result<LlmCompletion> {
+    pub async fn classify(&self, message_id: i64, classifier_key: &String) -> Result<LlmCompletion> {
         let message = Message::get(message_id).await?
             .ok_or(Error::msg("message not found in db"))?;
+
+        let classifier_state = self.classifiers.get(classifier_key.as_str())
+            .ok_or(Error::msg(format!("unknown classifier {}", classifier_key)))?;
+        let cfg_classifier = anvilope_config!().classifiers.iter()
+            .find(|c| c._key == *classifier_key)
+            .ok_or(Error::msg(format!("classifier {} not present in config", classifier_key)))?;
 
         //
         // decide whether to read plain text or HTML content
@@ -179,6 +247,7 @@ impl Llm  {
         }
 
         let classify_prompt = prompt::assemble_prompt(
+            cfg_classifier,
             &message.from_address,
             &message.from_name,
             &message.subject,
@@ -189,11 +258,9 @@ impl Llm  {
         self.run_chat(&mut chat).await?;
         let final_response = chat.last_message()?.content.clone();
 
-        let classifier_id = Classifier::get_active().await?.unwrap().id;
-
         let mut class_id: Option<i64> = None;
         let mut class_key: Option<String> = None;
-        match self.process_llm_response(&final_response).await {
+        match self.process_llm_response(&final_response, classifier_key).await {
             Ok((id, key)) => {
                 class_id = Some(id);
                 class_key = Some(key);
@@ -207,7 +274,7 @@ impl Llm  {
 
         let completion = LlmCompletion::create(
             message_id,
-            classifier_id,
+            classifier_state.id,
             final_response,
             full_trace,
             class_id,
@@ -218,7 +285,8 @@ impl Llm  {
     }
 
     /// Takes the LLM response and attempts to cleanly extract the chosen class.
-    pub async fn process_llm_response(&self, llm_response: &String) -> Result<(i64, String)> {
+    /// Returns the class row id and the namespaced "<classifier>.<class>" key.
+    pub async fn process_llm_response(&self, llm_response: &String, classifier_key: &String) -> Result<(i64, String)> {
         // TODO: make custom llm error type
         let obj: Value = serde_json::from_str(llm_response.as_str())
             .map_err(|_| Error::msg("LLM response not valid JSON"))?;
@@ -230,9 +298,12 @@ impl Llm  {
         let class_v = obj[class_k].as_str()
             .ok_or(Error::msg("LLM repsonse contains unexpected type for \"class\" property"))?;
 
-        for (key, id) in self.class_key_id_map.iter() {
+        let state = self.classifiers.get(classifier_key.as_str())
+            .ok_or(Error::msg(format!("unknown classifier {}", classifier_key)))?;
+        for (key, id) in state.class_key_id_map.iter() {
             if key.to_lowercase() == class_v.to_lowercase() {
-                return Ok((id.to_owned(), key.to_owned()));
+                let namespaced_key = format!("{}.{}", classifier_key, key);
+                return Ok((id.to_owned(), namespaced_key));
             }
         }
 
@@ -247,8 +318,8 @@ impl Llm  {
                 None => break,
             };
 
-            info!("sending message_id={} to LLM", job.message_id);
-            let completion_result = self.classify(job.message_id).await;
+            info!("sending message_id={} (classifier={}) to LLM", job.message_id, job.classifier_key);
+            let completion_result = self.classify(job.message_id, &job.classifier_key).await;
 
             let mut job_failed = true;
             if let Ok(completion) = completion_result {
@@ -270,5 +341,96 @@ impl Llm  {
         }
 
         Ok(())
+    }
+}
+
+/// Archives a classifier row along with all active class rows that belong to it.
+async fn archive_classifier_and_classes(cf_id: i64, db_classes: &[Class]) -> Result<()> {
+    for db_class in db_classes.iter().filter(|c| c.classifier_id == cf_id) {
+        Class::archive(db_class.id).await?;
+    }
+    Classifier::archive(cf_id).await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{
+        AnvilopeConfig,
+        RunMode,
+    };
+
+    fn init_test_globals() {
+        crate::ANVILOPE_CONFIG.get_or_init(|| AnvilopeConfig::new(RunMode::Test));
+        // delete the test db if it exists so we get a fresh run
+        let db_path = anvilope_config!().db_path.to_owned();
+        let _ = std::fs::remove_file(&db_path);
+        crate::DB_POOL.get_or_init(|| crate::db::init_pool());
+        crate::db::ensure_tables().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_sync_prompts() {
+        init_test_globals();
+
+        // simulate a classifier from a previous config that no longer exists
+        let stale_cf = Classifier::create(
+            "stale".to_string(),
+            "stale prompt".to_string(),
+            false,
+        ).await.unwrap();
+        Class::create(
+            stale_cf.id,
+            "staleclass".to_string(),
+            "stale".to_string(),
+            false,
+        ).await.unwrap();
+
+        // first sync
+        let state = Llm::sync_prompts().await.unwrap();
+        let cfg = anvilope_config!();
+
+        assert_eq!(state.len(), cfg.classifiers.len());
+        let db_cfs = Classifier::get_active().await.unwrap();
+        assert_eq!(db_cfs.len(), cfg.classifiers.len());
+        for cfg_cf in cfg.classifiers.iter() {
+            let db_cf = db_cfs.iter().find(|c| c.key == cfg_cf._key)
+                .unwrap_or_else(|| panic!("classifier {} not active", cfg_cf._key));
+            assert_eq!(db_cf.prompt, cfg_cf.prompt);
+            let st = state.get(cfg_cf._key.as_str()).unwrap();
+            assert_eq!(st.id, db_cf.id);
+            assert_eq!(st.class_key_id_map.len(), cfg_cf.classes.len());
+        }
+
+        // stale classifier and its classes should have been archived
+        assert!(db_cfs.iter().all(|c| c.key != "stale"));
+
+        // all configured classes should be present as active rows under the
+        // correct classifier
+        let total_classes: usize = cfg.classifiers.iter().map(|c| c.classes.len()).sum();
+        let db_classes = Class::get_active().await.unwrap();
+        assert_eq!(db_classes.len(), total_classes);
+        assert!(db_classes.iter().all(|c| c.key != "staleclass"));
+        for cfg_cf in cfg.classifiers.iter() {
+            let db_cf = db_cfs.iter().find(|c| c.key == cfg_cf._key).unwrap();
+            for (class_key, class_prompt) in cfg_cf.classes.iter() {
+                let db_class = db_classes.iter()
+                    .find(|c| c.classifier_id == db_cf.id && c.key == *class_key)
+                    .unwrap_or_else(|| panic!("class {}.{} not active", cfg_cf._key, class_key));
+                assert_eq!(db_class.prompt, *class_prompt);
+            }
+        }
+
+        // second sync should be a no-op
+        let state2 = Llm::sync_prompts().await.unwrap();
+        for cfg_cf in cfg.classifiers.iter() {
+            let s1 = state.get(cfg_cf._key.as_str()).unwrap();
+            let s2 = state2.get(cfg_cf._key.as_str()).unwrap();
+            assert_eq!(s2.id, s1.id);
+            assert_eq!(s2.class_key_id_map, s1.class_key_id_map);
+        }
+        assert_eq!(Classifier::get_active().await.unwrap().len(), cfg.classifiers.len());
+        assert_eq!(Class::get_active().await.unwrap().len(), total_classes);
     }
 }

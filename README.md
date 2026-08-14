@@ -77,9 +77,44 @@ Changes will need to be made for:
   use in the LLM section
 + The IMAP account information in the accounts section
 + Optionally, the IMAP account name to something more fitting than "greenmail"
-+ Optionally, the main `prompt` template in the classifier section
-+ Optionally, the individual classes and each `prompt` in the classes section
-+ Optionally, what label to assign emails in each class (Note: labels are IMAP folders)
++ Optionally, the `prompt` template and `classes` of each classifier in the
+  classifiers section
++ Optionally, which classifiers each account runs and what actions to take when
+  messages are classified into each class
+
+#### Format
+
++ The `classifiers` section contains one or more named classifiers. Each
+  classifier has a `prompt` template and a `classes` table mapping class names
+  to short class prompt descriptions. Every message received on an account is
+  run through each of that account's classifiers.
++ Each account lists the names of the classifiers to run on its messages with
+  the `classifiers` key.
++ Each account may also define a list of `actions` to apply when a message is
+  classified into a given class. The `if_class` property references a class as
+  `<classifier name>.<class name>`. The only action type currently supported is
+  `label`, which copies the message into the given IMAP folder (the `name`
+  property).
+
+An example of the accounts and classifiers sections:
+
+```toml
+[accounts]
+gmail.host = "imap.gmail.com"
+gmail.port = 993
+gmail.username = "example_user@gmail.com"
+gmail.password = "example_password"
+gmail.classifiers = ["categories"]
+gmail.actions = [
+    { type = "label", name = "my_spam_folder", if_class = "categories.spam" },
+    { type = "label", name = "my_personal_emails", if_class = "categories.personal" },
+]
+
+[classifiers.categories]
+prompt = """..."""
+classes.personal = "..."
+classes.spam = "..."
+```
 
 #### IMAP Credentials
 If credentials for an IMAP account are not specified in the configuration file
@@ -103,7 +138,7 @@ to the LLM. Special variables are used to allow for customizing where different
 pieces of content get inserted.
 
 + `{{ classes }}`: a list of class names and each class's sub-prompt as defined
-+ in the classes section
++ in that classifier's `classes` table
 + `{{ email_message }}`: the content of the current incoming email message
 
 ##### Response Format

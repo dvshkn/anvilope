@@ -73,7 +73,7 @@ async fn test_download_message() -> Result<()> {
     ImapSessionManager::download_message(session_ref.clone(), "INBOX".to_string(), expected_ord).await;
     let event = rx.recv().await.unwrap();
     match event {
-        AnvilopeEvent::MessageDownloaded { message_id } => {
+        AnvilopeEvent::MessageDownloaded { message_id, .. } => {
             assert!(message_id > 0);
         },
         _ => {

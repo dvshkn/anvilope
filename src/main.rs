@@ -35,7 +35,12 @@ fn init_config() {
     crate::ANVILOPE_CONFIG.get_or_init(|| AnvilopeConfig::new(RunMode::Production));
     crate::TEMPLATE_ENV.get_or_init(|| {
         let mut template_env = minijinja::Environment::new();
-        template_env.add_template("classifier", anvilope_config!().classifier.prompt.as_str()).unwrap();
+        for classifier in anvilope_config!().classifiers.iter() {
+            template_env.add_template_owned(
+                format!("classifier.{}", classifier._key),
+                classifier.prompt.to_owned(),
+            ).unwrap();
+        }
         template_env.add_template("classes", llm::prompt::TEMPLATE_CLASSES).unwrap();
         template_env.add_template("email_message", llm::prompt::TEMPLATE_EMAIL_MESSAGE).unwrap();
         template_env.add_template("system_prompt", llm::prompt::TEMPLATE_SYSTEM).unwrap();
@@ -186,10 +191,16 @@ async fn cli_serve(_matches: &ArgMatches) -> Result<()> {
                         ImapSessionManager::download_message(listener.clone(), mailbox, ord).await;
                         ImapSessionManager::spawn_listener(listener);
                     }
-                    AnvilopeEvent::MessageDownloaded { message_id } => {
+                    AnvilopeEvent::MessageDownloaded { message_id, account_key } => {
                         info!("message downloaded event");
                         info!("message written to database, id={}", message_id);
-                        LlmJob::enqueue(message_id).await?;
+                        let account = anvilope_config!().accounts.iter()
+                            .find(|a| a._key == account_key)
+                            .ok_or(anyhow::anyhow!("account {} not found in config", account_key))?;
+                        // enqueue one llm job per classifier the account runs
+                        for classifier_key in account.classifiers.iter() {
+                            LlmJob::enqueue(message_id, classifier_key).await?;
+                        }
                         Llm::spawn(llm.clone());
                     }
                     AnvilopeEvent::MessageClassified { message_id, class_key } => {

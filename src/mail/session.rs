@@ -29,7 +29,10 @@ use stop_token::StopSource;
 use tokio::sync::mpsc::Sender;
 
 use crate::{AnvilopeEvent, ErrorSeverity, anvilope_config};
-use crate::config::Account;
+use crate::config::{
+    Account,
+    ActionType,
+};
 use crate::db::Message;
 use crate::mail::parse::TextPartMimeType;
 
@@ -232,30 +235,44 @@ impl ImapSessionManager {
         let session_cell = self.session_cell.lock().await;
         let mut session = session_cell.take().unwrap();
 
-        let class = anvilope_config!().classes.iter().find(|c| c._key == class_key).unwrap();
-        let dest_folder = class.labels.get(&self.account_key).unwrap();
-        debug!("class_key = {}, {} -> {}", class_key, src_mailbox, dest_folder);
+        let account = anvilope_config!().accounts.iter()
+            .find(|a| a._key == self.account_key)
+            .ok_or(Error::msg("account not found in config"))?;
 
-        // check for destination folder
-        let ls_res = session.list(None, Some(dest_folder))
-            .await?
-            .collect::<Vec<_>>()
-            .await;
-        let dest_folder_exists = ls_res.iter().find(|maybe| {
-            if let Ok(name) = maybe {
-                name.name() == dest_folder
+        // every action on this account that applies to the given class
+        let dest_folders: Vec<String> = account.actions.iter()
+            .filter(|action| action.if_class == class_key)
+            .filter(|action| matches!(action.r#type, ActionType::Label))
+            .map(|action| action.name.to_owned())
+            .collect();
+        if dest_folders.is_empty() {
+            debug!("no actions configured for class {} on account {}", class_key, self.account_key);
+        }
+
+        for dest_folder in dest_folders.iter() {
+            debug!("class_key = {}, {} -> {}", class_key, src_mailbox, dest_folder);
+
+            // check for destination folder
+            let ls_res = session.list(None, Some(dest_folder))
+                .await?
+                .collect::<Vec<_>>()
+                .await;
+            let dest_folder_exists = ls_res.iter().find(|maybe| {
+                if let Ok(name) = maybe {
+                    name.name() == dest_folder
+                } else {
+                    false
+                }
+            }).is_some();
+
+            if dest_folder_exists {
+                session.select(src_mailbox.as_str()).await?;
+                session.uid_copy(uid.to_string(), dest_folder).await?;
+
+                debug!("uid_copy to {} finished", uid);
             } else {
-                false
+                warn!("label {} does not exist for account {}", dest_folder, self.account_key);
             }
-        }).is_some();
-
-        if dest_folder_exists {
-            session.select(src_mailbox).await?;
-            session.uid_copy(uid.to_string(), dest_folder).await?;
-
-            debug!("uid_copy to {} finished", uid);
-        } else {
-            warn!("label {} does not exist for account {}", dest_folder, self.account_key);
         }
 
         // be polite, always put the session back
@@ -439,7 +456,10 @@ impl ImapSessionManager {
         info!("downloaded message from {} for account {}", db_record.from_address, self.account_key);
         debug!("wrote message to database id={}", db_record.id);
 
-        Ok(AnvilopeEvent::MessageDownloaded { message_id: db_record.id })
+        Ok(AnvilopeEvent::MessageDownloaded {
+            message_id: db_record.id,
+            account_key: self.account_key.to_owned(),
+        })
     }
 }
 
