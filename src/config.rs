@@ -40,8 +40,19 @@ pub struct AnvilopeConfig {
     pub tls_client_config: Arc<ClientConfig>,
     pub llm: Llm,
     pub accounts: Vec<Account>,
+    pub classifiers: HashMap<String, Classifier>,
+
+    // HACK: for backwards compat, remove this
     pub classifier: Classifier,
     pub classes: Vec<Class>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Class {
+    pub _key: String,
+    pub _db_id: Option<i64>,
+    pub prompt: String,
+    pub labels: HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -67,21 +78,30 @@ pub struct Account {
 
     #[serde(default = "Account::default_use_tls")]
     pub use_tls: bool,
+
+    #[serde(default)]
+    pub actions: Vec<Action>,
+
+    #[serde(default)]
+    pub classifiers: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct Classifier {
-    pub _db_id: Option<i64>,
-    pub prompt: String,
-    pub script: Option<String>,
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Action {
+    Copy { folder: String, condition: String },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Class {
+#[derive(Debug, Deserialize, Clone)]
+pub struct Classifier {
+    #[serde(default)]
+    pub _db_id: i64,
+
+    #[serde(default)]
     pub _key: String,
-    pub _db_id: Option<i64>,
+
     pub prompt: String,
-    pub labels: HashMap<String, String>,
+    pub classes: HashMap<String, String>,
 }
 
 impl Llm {
@@ -107,20 +127,6 @@ impl Account {
             return value.to_owned();
         }
         return "".to_string();
-    }
-}
-
-impl Classifier {
-    pub fn set_db_id(&mut self, id: i64) -> Result<()> {
-        self._db_id = Some(id);
-        Ok(())
-    }
-}
-
-impl Class {
-    pub fn set_db_id(&mut self, id: i64) -> Result<()> {
-        self._db_id = Some(id);
-        Ok(())
     }
 }
 
@@ -153,16 +159,13 @@ impl AnvilopeConfig {
             .expect("cannot parse [llm] section of config");
         let accounts = Self::parse_accounts_section(&root_config)
             .expect("cannot parse [accounts] section of config");
-        let mut classifier = Self::parse_classifier_section(&root_config)
+        let classifiers = Self::parse_classifiers_section(&root_config)
             .expect("cannot parse [classifier] section of config");
-        let mut classes = Self::parse_classes_section(&root_config, &accounts)
-            .expect("cannot parse [classes] section of config");
 
-        // some hygiene
-        classifier.prompt = classifier.prompt.trim().to_string();
-        for c in classes.iter_mut() {
-            c.prompt = c.prompt.trim().to_string();
-        }
+        // HACK
+        let classes: Vec<Class> = Vec::new();
+        let classes2: HashMap<String, String> = HashMap::new();
+        let classifier = Classifier { _db_id: 0, _key: "void".to_string(), prompt: "void".to_string(), classes: classes2 };
 
         // setup TLS
         let tls_client_config = Arc::new(ClientConfig::with_platform_verifier());
@@ -175,6 +178,8 @@ impl AnvilopeConfig {
             tls_client_config,
             llm,
             accounts,
+            classifiers,
+
             classifier,
             classes,
         };
@@ -213,33 +218,40 @@ impl AnvilopeConfig {
             }
         }
 
-        // check prompt template
+        // check prompt templates
         let re_classes = Regex::new(r"\{\{\s*classes\s*\}\}")?;
         let re_email = Regex::new(r"\{\{\s*email_message\s*\}\}")?;
-        if !re_classes.is_match(self.classifier.prompt.as_str()) {
-            error!("classifier prompt lacks a \"{{{{ classes }}}}\" variable");
-            error = true;
-        }
-        if !re_email.is_match(self.classifier.prompt.as_str()) {
-            error!("classifier prompt lacks a \"{{{{ email_message }}}}\" variable");
-            error = true;
-        }
-
-        if self.classes.len() < 1 {
-            error!("no classes configured!");
-            error = true;
-        }
+        let re_disallowed_chars = Regex::new(r"\W")?;
+        self.classifiers.iter().for_each(|(s, c)| {
+            if re_disallowed_chars.is_match(s) {
+                error!("classifier name '{}' contains disallowed special characters", s);
+                error = true;
+            }
+            if !re_classes.is_match(c.prompt.as_str()) {
+                error!("classifier '{}' prompt lacks a \"{{{{ classes }}}}\" variable", s);
+                error = true;
+            }
+            if !re_email.is_match(c.prompt.as_str()) {
+                error!("classifier '{}' prompt lacks a \"{{{{ email_message }}}}\" variable", s);
+                error = true;
+            }
+            if c.classes.len() < 1 {
+                error!("classifier '{}' has no classes configured!", s);
+                error = true;
+            }
+            c.classes.keys().for_each(|k| {
+                if re_disallowed_chars.is_match(k) {
+                    error!("class name '{}' contains disallowed special characters", k);
+                    error = true;
+                }
+            });
+        });
 
         if error {
             return Err(Error::msg("config validation failed"));
         }
 
         Ok(())
-    }
-
-    pub fn ensure_files() -> () {
-        // TODO: create dir and files if not exist
-        ()
     }
 
     fn parse_llm_section(root: &Map<String, Value>) -> Result<Llm> {
@@ -279,53 +291,23 @@ impl AnvilopeConfig {
         Ok(accounts)
     }
 
-    fn parse_classifier_section(root: &Map<String, Value>) -> Result<Classifier> {
-        let section = root.get("classifier")
-            .ok_or(anyhow!("required [classifier] section is missing"))?;
-        let classifier = section.as_table()
-            .ok_or(anyhow!("malformed [classifier] section"))?
-            .to_owned()
-            .try_into()?;
+    fn parse_classifiers_section(root: &Map<String, Value>) -> Result<HashMap<String, Classifier>> {
+        let section = root.get("classifiers")
+            .ok_or(anyhow!("required [classifiers] section is missing"))?;
 
-        Ok(classifier)
-    }
-
-    fn parse_classes_section(root: &Map<String, Value>, accounts: &Vec<Account>) -> Result<Vec<Class>> {
-        let section = root.get("classes")
-            .ok_or(anyhow!("required [classes] section is missing"))?;
-        let keys = section.as_table()
-            .ok_or(anyhow!("required [classes] section is malformed"))?
-            .keys();
-
-        let mut classes: Vec<Class> = Vec::new();
-        for k in keys {
-            let class_map = section[k].as_table()
-                .ok_or(anyhow!("malformed class entry: {}", k))?
-                .to_owned();
-
-            let _key = k.to_owned();
-            let prompt = class_map.get("prompt").unwrap().as_str().unwrap().to_string();
-            let mut labels: HashMap<String, String> = HashMap::new();
-
-            // labels are optional, default to account key string
-            for acct in accounts {
-                labels.insert(acct._key.to_owned(), acct._key.to_owned());
-            }
-            if let Some(src_labels_value) = class_map.get("labels") {
-                let src_labels_map = src_labels_value.as_table().unwrap();
-                for (k, v) in src_labels_map.iter() {
-                    labels.insert(k.to_owned(), v.as_str().unwrap().to_owned());
+        let mut result: HashMap<String, Classifier> = HashMap::new();
+        section.as_table()
+            .ok_or(anyhow!("malformed [classifiers] section"))?
+            .iter()
+            .try_for_each(|(s, v)| {
+                if let Ok(classifier) = v.to_owned().try_into() {
+                    result.insert(s.to_owned(), classifier);
+                    Ok(())
+                } else {
+                    Err(anyhow!("malformed classifier definition '{}', ensure that both prompt and classes are specified", s))
                 }
-            }
+            })?;
 
-            classes.push(Class {
-                _key,
-                _db_id: None,
-                prompt,
-                labels,
-            });
-        }
-
-        Ok(classes)
+        Ok(result)
     }
 }
