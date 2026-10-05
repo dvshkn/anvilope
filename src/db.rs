@@ -1,4 +1,3 @@
-pub mod class;
 pub mod classifier;
 pub mod llm_completion;
 pub mod db_table;
@@ -7,7 +6,6 @@ pub mod message;
 pub mod meta;
 pub mod migrate;
 
-pub use class::Class;
 pub use classifier::Classifier;
 use db_table::DbTable;
 pub use llm_completion::LlmCompletion;

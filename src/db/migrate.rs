@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::Result;
 use fallible_iterator::FallibleIterator;
 use log::{
@@ -5,8 +7,7 @@ use log::{
     info,
 };
 use rusqlite::{
-    Batch,
-    Connection
+    Batch, Connection, fallible_streaming_iterator::FallibleStreamingIterator, named_params
 };
 
 type MigrationFn = fn(conn: &Connection) -> Result<()>;
@@ -16,6 +17,7 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     let mut migrations = [
         (1, migrate_001_baptize as MigrationFn),
         (2, migrate_002_add_trace_column as MigrationFn),
+        (3, migrate_003_merge_class_into_classifier as MigrationFn),
     ];
     migrations.sort_by_key(|tup| tup.0);
 
@@ -90,6 +92,40 @@ pub fn exec_sql_string(conn: &Connection, statements: &str) -> Result<usize> {
 //
 // migrations
 ////////////////
+
+fn migrate_003_merge_class_into_classifier(conn: &Connection) -> Result<()> {
+    exec_sql_string(conn, "ALTER TABLE classifier ADD COLUMN key TEXT")?;
+    exec_sql_string(conn, "ALTER TABLE classifier ADD COLUMN classes TEXT")?;
+
+    exec_sql_string(conn, "UPDATE classifier SET key = \"default\"")?;
+    exec_sql_string(conn, "UPDATE classifier SET classes = \"{}\"")?;
+
+    // NOTE: only backfilling the classes column for the current unarchived
+    //       classifier because the archived class rows are not consistent
+    let mut classes: HashMap<String, String> = HashMap::new();
+    let mut stmt = conn.prepare(
+        "SELECT key, prompt FROM class WHERE archived_at IS NULL"
+    )?;
+    stmt.query([])?.for_each(|row| {
+        let key: String = row.get(0).unwrap();
+        let prompt: String = row.get(1).unwrap();
+        classes.insert(key, prompt);
+    })?;
+    let classes_json = serde_json::to_string(&classes)?;
+    conn.execute(
+        "UPDATE classifier SET classes = ? WHERE id = (
+            SELECT id FROM classifier WHERE archived_at IS NULL ORDER BY id DESC LIMIT 1
+        )",
+        [&classes_json],
+    )?;
+
+    exec_sql_string(conn, "DROP TABLE class")?;
+
+    exec_sql_string(conn, "ALTER TABLE classifier ALTER COLUMN key SET NOT NULL")?;
+    exec_sql_string(conn, "ALTER TABLE classifier ALTER COLUMN classes SET NOT NULL")?;
+
+    Ok(())
+}
 
 fn migrate_002_add_trace_column(conn: &Connection) -> Result<()> {
     let contents = include_str!("../../migrations/migrate_002.sql");

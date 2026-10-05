@@ -10,8 +10,6 @@ use log::{
     error,
     info,
 };
-use serde::Deserialize;
-use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,8 +17,9 @@ use tokio::sync::Mutex;
 use tokio::sync::mpsc::Sender;
 
 use crate::anvilope_config;
+use crate::config::Class;
 use crate::db::{
-    Class, Classifier, LlmCompletion, LlmJob, Message
+    Classifier, LlmCompletion, LlmJob, Message
 };
 use crate::AnvilopeEvent;
 use crate::mail::parse;
@@ -78,7 +77,11 @@ impl Llm  {
         };
 
         // make sure database reflects current configuration
-        let (classifier_id, class_key_id_map) = Self::sync_prompts().await?;
+        // let (classifier_id, class_key_id_map) = Self::sync_prompts().await?;
+        // HACK: revisit this
+        Self::sync_prompts().await?;
+        let classifier_id = 0;
+        let class_key_id_map: HashMap<String, i64> = HashMap::new();
 
         Ok(Llm { api, classifier_id, class_key_id_map, root_tx, busy })
     }
@@ -102,52 +105,40 @@ impl Llm  {
         });
     }
 
-    /// Iterates through configuration and updates prompt records in the `classifier` and `class`
-    /// database tables. Returns relevant IDs of active entries.
-    pub async fn sync_prompts() -> Result<(i64, HashMap<String, i64>)> {
-        let mut classifier_id: i64;
-        let mut class_key_id_map: HashMap<String, i64> = HashMap::new();
+    /// Iterates through configuration and updates prompt records in the
+    /// `classifier` database tables. Returns relevant IDs of active entries.
+    pub async fn sync_prompts() -> Result<()> {
+        let db_classifiers = Classifier::get_active().await?;
+        let mut new_active_ids: Vec<i64> = Vec::new();
 
-        let curr_prompt = anvilope_config!().classifier.prompt.to_owned();
-        if let Some(prev_classifier) = Classifier::get_active().await? {
-            classifier_id = prev_classifier.id;
-            if prev_classifier.prompt != curr_prompt {
-                let new_classifier = Classifier::create(curr_prompt, true).await?;
-                Classifier::set_active(new_classifier.id).await?;
-                classifier_id = new_classifier.id;
-            }
-        } else {
-            let classifier = Classifier::create(curr_prompt, false).await?;
-            classifier_id = classifier.id;
-        }
-
-        // TODO: having both the config and database structs named "Class" isn't great
-        let db_classes = Class::get_active().await?;
-        let db_key_class_map: HashMap<_, _> = db_classes.iter()
-            .map(|c| (c.key.as_str(), c))
-            .collect();
-        for cfg_class in anvilope_config!().classes.iter() {
-            let k = cfg_class._key.as_str();
-            if let Some(class) = db_key_class_map.get(k) {
-                class_key_id_map.insert(class.key.to_owned(), class.id);
-                if cfg_class.prompt != class.prompt {
-                    let new_class = Class::create(
-                        k.to_string(),
-                        cfg_class.prompt.to_owned(),
-                        true
-                    ).await?;
-                    class_key_id_map.insert(new_class.key.to_owned(), new_class.id);
+        for (key, classifier) in anvilope_config!().classifiers.iter() {
+            let mut need_write = false;
+            if let Some(db_copy) = db_classifiers.get(key) {
+                println!("db copy");
+                if !db_copy.equivalent_to(classifier) {
+                    need_write = true;
+                } else {
+                    new_active_ids.push(db_copy.id);
                 }
             } else {
-                let class = Class::create(k.to_string(), cfg_class.prompt.to_owned(), true).await?;
-                class_key_id_map.insert(class.key.to_owned(), class.id);
+                println!("not found");
+                need_write = true;
+            }
+            println!("\tclassifier {} -- need_write={}", key, need_write);
+            if need_write {
+                let db_classifier = Classifier::create(
+                    key.to_owned(),
+                    classifier.prompt.to_owned(),
+                    &classifier.classes,
+                    false
+                ).await?;
+                new_active_ids.push(db_classifier.id);
             }
         }
 
-        let active_ids: Vec<i64> = class_key_id_map.values().cloned().collect();
-        Class::set_active(active_ids).await?;
+        Classifier::set_active(&new_active_ids).await?;
 
-        Ok((classifier_id, class_key_id_map))
+        Ok(())
     }
 
     pub async fn run_chat(&self, chat: &mut ClassificationChat) -> Result<()> {
@@ -189,7 +180,8 @@ impl Llm  {
         self.run_chat(&mut chat).await?;
         let final_response = chat.last_message()?.content.clone();
 
-        let classifier_id = Classifier::get_active().await?.unwrap().id;
+        // HACK: fix this for real
+        let classifier_id = Classifier::get_active().await?.get("default").unwrap().id;
 
         let mut class_id: Option<i64> = None;
         let mut class_key: Option<String> = None;

@@ -1,0 +1,2 @@
+ALTER TABLE classifier ADD COLUMN key TEXT NOT NULL DEFAULT "default";
+ALTER TABLE classifier ADD COLUMN classes TEXT NOT NULL DEFAULT "{}";
