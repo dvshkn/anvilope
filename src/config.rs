@@ -50,7 +50,6 @@ pub struct AnvilopeConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Class {
     pub _key: String,
-    pub _db_id: Option<i64>,
     pub prompt: String,
     pub labels: HashMap<String, String>,
 }
@@ -94,9 +93,6 @@ pub enum Action {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Classifier {
-    #[serde(default)]
-    pub _db_id: i64,
-
     #[serde(default)]
     pub _key: String,
 
@@ -165,7 +161,7 @@ impl AnvilopeConfig {
         // HACK
         let classes: Vec<Class> = Vec::new();
         let classes2: HashMap<String, String> = HashMap::new();
-        let classifier = Classifier { _db_id: 0, _key: "void".to_string(), prompt: "void".to_string(), classes: classes2 };
+        let classifier = Classifier { _key: "void".to_string(), prompt: "void".to_string(), classes: classes2 };
 
         // setup TLS
         let tls_client_config = Arc::new(ClientConfig::with_platform_verifier());

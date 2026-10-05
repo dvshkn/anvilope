@@ -17,7 +17,6 @@ use tokio::sync::Mutex;
 use tokio::sync::mpsc::Sender;
 
 use crate::anvilope_config;
-use crate::config::Class;
 use crate::db::{
     Classifier, LlmCompletion, LlmJob, Message
 };

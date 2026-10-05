@@ -16,7 +16,7 @@ use super::DbTable;
 pub struct Message {
     pub id: i64,
     pub account_key: String,
-    pub class_key: Option<String>,
+    pub class_keys: Option<String>,
     pub from_address: String,
     pub from_name: String,
     pub subject: String,
@@ -34,7 +34,7 @@ impl From<&Row<'_>> for Message {
         Message {
             id: r.get("id").unwrap(),
             account_key: r.get("account_key").unwrap(),
-            class_key: r.get("class_key").unwrap(),
+            class_keys: r.get("class_key").unwrap(),
             from_address: r.get("from_address").unwrap(),
             from_name: r.get("from_name").unwrap(),
             subject: r.get("subject").unwrap(),
@@ -52,14 +52,14 @@ impl Message {
         tokio::task::spawn_blocking(move || {
             let conn = checkout_db_conn!();
             let res = super::exec_return_int2(&conn,
-                "INSERT INTO message (account_key, class_key, from_address,
+                "INSERT INTO message (account_key, class_keys, from_address,
                 from_name, subject, body_plain, body_html, uid, uid_validity)
-                VALUES (:account_key, :class_key, :from_address, :from_name,
+                VALUES (:account_key, :class_keys, :from_address, :from_name,
                 :subject, :body_plain, :body_html, :uid, :uid_validity)
                 RETURNING id, created_at",
                 named_params! {
                     ":account_key": msg.account_key,
-                    ":class_key": msg.class_key,
+                    ":class_keys": msg.class_keys,
                     ":from_address": msg.from_address,
                     ":from_name": msg.from_name,
                     ":subject": msg.subject,

@@ -7,8 +7,10 @@ use log::{
     info,
 };
 use rusqlite::{
-    Batch, Connection, fallible_streaming_iterator::FallibleStreamingIterator, named_params
+    Batch,
+    Connection,
 };
+use rusqlite::fallible_streaming_iterator::FallibleStreamingIterator;
 
 type MigrationFn = fn(conn: &Connection) -> Result<()>;
 
@@ -18,6 +20,8 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         (1, migrate_001_baptize as MigrationFn),
         (2, migrate_002_add_trace_column as MigrationFn),
         (3, migrate_003_merge_class_into_classifier as MigrationFn),
+        (4, migrate_004_remove_fks_from_llm_completion_table as MigrationFn),
+        (5, migrate_005_rename_message_table_class_keys_column as MigrationFn),
     ];
     migrations.sort_by_key(|tup| tup.0);
 
@@ -92,6 +96,24 @@ pub fn exec_sql_string(conn: &Connection, statements: &str) -> Result<usize> {
 //
 // migrations
 ////////////////
+
+fn migrate_005_rename_message_table_class_keys_column(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "UPDATE message SET class_key = ? || class_key || ? WHERE class_key IS NOT NULL",
+        ["[\"default.", "\"]"]
+    )?;
+
+    exec_sql_string(conn, "ALTER TABLE message RENAME COLUMN class_key TO class_keys")?;
+
+    Ok(())
+}
+
+fn migrate_004_remove_fks_from_llm_completion_table(conn: &Connection) -> Result<()> {
+    let contents = include_str!("../../migrations/migrate_004.sql");
+    let _ = exec_sql_string(conn, contents)?;
+
+    Ok(())
+}
 
 fn migrate_003_merge_class_into_classifier(conn: &Connection) -> Result<()> {
     exec_sql_string(conn, "ALTER TABLE classifier ADD COLUMN key TEXT")?;
