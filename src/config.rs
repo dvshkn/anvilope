@@ -165,7 +165,9 @@ impl AnvilopeConfig {
         }
 
         // setup TLS
-        let tls_client_config = Arc::new(ClientConfig::with_platform_verifier());
+        let tls_client_config = ClientConfig::with_platform_verifier()
+            .expect("cannot get TLS configuration for system");
+        let tls_client_config = Arc::new(tls_client_config);
 
         debug!("configuration loaded: {:#?}", config_file_path_2);
 
