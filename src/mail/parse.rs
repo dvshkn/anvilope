@@ -14,10 +14,7 @@ use base64::prelude::{
     Engine,
 };
 use chrono::DateTime;
-use html_to_markdown_rs::{
-    ConversionOptions,
-    convert,
-};
+use html_to_markdown_rs::ConversionOptions;
 use log::{
     debug,
     warn,
@@ -117,7 +114,7 @@ pub fn parse_header(account_key: &String, bytes: &[u8]) -> Result<Message> {
     Ok(Message {
         id: 0,
         account_key: account_key.to_owned(),
-        class_key: None,
+        class_keys: "[]".to_string(),
         from_address,
         from_name,
         subject,

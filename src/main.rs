@@ -35,7 +35,10 @@ fn init_config() {
     crate::ANVILOPE_CONFIG.get_or_init(|| AnvilopeConfig::new(RunMode::Production));
     crate::TEMPLATE_ENV.get_or_init(|| {
         let mut template_env = minijinja::Environment::new();
-        template_env.add_template("classifier", anvilope_config!().classifier.prompt.as_str()).unwrap();
+        for (clfr_key, clfr) in anvilope_config!().classifiers.iter() {
+            let k = format!("classifier/{}", clfr_key);
+            template_env.add_template_owned(k, clfr.prompt.to_owned()).unwrap();
+        }
         template_env.add_template("classes", llm::prompt::TEMPLATE_CLASSES).unwrap();
         template_env.add_template("email_message", llm::prompt::TEMPLATE_EMAIL_MESSAGE).unwrap();
         template_env.add_template("system_prompt", llm::prompt::TEMPLATE_SYSTEM).unwrap();
@@ -168,7 +171,7 @@ async fn cli_serve(_matches: &ArgMatches) -> Result<()> {
                         let old_listener = key_listener_map.get(account_key.as_str()).unwrap();
                         let _ = old_listener.logout().await;
                         debug!("logout of old connection finished");
-                        let acct = anvilope_config!().accounts.iter().find(|a| a._key == account_key).unwrap();
+                        let acct = anvilope_config!().account(&account_key).unwrap();
                         if let Ok(new_listener) = ImapSessionManager::new(&acct, tx.clone(), backoff_count).await {
                             let new_listener_ref = Arc::new(new_listener);
                             key_listener_map.insert(acct._key.as_str(), new_listener_ref.clone());
@@ -192,19 +195,19 @@ async fn cli_serve(_matches: &ArgMatches) -> Result<()> {
                         LlmJob::enqueue(message_id).await?;
                         Llm::spawn(llm.clone());
                     }
-                    AnvilopeEvent::MessageClassified { message_id, class_key } => {
+                    AnvilopeEvent::MessageClassified { message_id, classes } => {
                         info!("message classified event");
-                        info!("updating class of message_id={} to \"{}\"", message_id, class_key);
-                        let message = Message::set_class(message_id, &class_key).await?.unwrap();
-                        let account_key = message.account_key;
-                        let listener = key_listener_map.get(account_key.as_str()).unwrap().clone();
-                        let mailbox = "INBOX".to_string(); // TODO
-                        ImapSessionManager::spawn_interrupt_copy_message(
-                            listener,
-                            mailbox,
-                            message.uid,
-                            class_key,
-                        );
+                        info!("message id={} classified as {}", message_id, serde_json::to_string(&classes)?);
+                        let message = Message::set_classes(message_id, &classes).await?.unwrap();
+                        // let account_key = message.account_key;
+                        // let listener = key_listener_map.get(account_key.as_str()).unwrap().clone();
+                        // let mailbox = "INBOX".to_string(); // TODO
+                        // ImapSessionManager::spawn_interrupt_copy_message(
+                        //     listener,
+                        //     mailbox,
+                        //     message.uid,
+                        //     class_key,
+                        // );
                     }
                     AnvilopeEvent::Noop { account_key } => {
                         debug!("no-op event {}", account_key);

@@ -8,7 +8,7 @@ use serde::{
     Serialize,
 };
 
-use crate::checkout_db_conn;
+use crate::{ClassifierClass, checkout_db_conn};
 
 use super::DbTable;
 
@@ -16,7 +16,7 @@ use super::DbTable;
 pub struct Message {
     pub id: i64,
     pub account_key: String,
-    pub class_keys: Option<String>,
+    pub class_keys: String,
     pub from_address: String,
     pub from_name: String,
     pub subject: String,
@@ -34,7 +34,7 @@ impl From<&Row<'_>> for Message {
         Message {
             id: r.get("id").unwrap(),
             account_key: r.get("account_key").unwrap(),
-            class_keys: r.get("class_key").unwrap(),
+            class_keys: r.get("class_keys").unwrap(),
             from_address: r.get("from_address").unwrap(),
             from_name: r.get("from_name").unwrap(),
             subject: r.get("subject").unwrap(),
@@ -100,13 +100,13 @@ impl Message {
         }).await?
     }
 
-    pub async fn set_class(id: i64, class_key: &String) -> Result<Option<Message>> {
-        let owned_class_key = class_key.to_owned();
+    pub async fn set_classes(id: i64, classes: &Vec<ClassifierClass>) -> Result<Option<Message>> {
+        let class_keys = serde_json::to_string(classes)?;
         tokio::task::spawn_blocking(move || {
             let conn = checkout_db_conn!();
             super::exec_return_first(&conn,
-                "UPDATE message SET class_key = ? WHERE id = ? RETURNING *",
-                (&owned_class_key, &id)
+                "UPDATE message SET class_keys = ? WHERE id = ? RETURNING *",
+                (&class_keys, &id)
             )
         }).await?
     }

@@ -14,7 +14,10 @@ use serde::{
     Deserialize,
     Serialize,
 };
-use std::collections::HashMap;
+use std::collections::{
+    HashMap,
+    HashSet
+};
 use std::fs::File;
 use std::io::prelude::Read;
 use std::path::PathBuf;
@@ -26,6 +29,8 @@ use toml::{
     Value,
 };
 use url::Url;
+
+use crate::ClassifierClass;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum RunMode {
@@ -81,14 +86,14 @@ pub struct Account {
     #[serde(default)]
     pub actions: Vec<Action>,
 
-    #[serde(default)]
-    pub classifiers: Vec<String>,
+    #[serde(default = "Account::default_classifiers")]
+    pub classifiers: HashSet<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Action {
-    Copy { folder: String, condition: String },
+    Copy { folder: String, condition: ClassifierClass },
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -108,6 +113,8 @@ impl Llm {
 
 impl Account {
     fn default_use_tls() -> bool { true }
+
+    fn default_classifiers() -> HashSet<String> { HashSet::new() }
 
     fn username_from_env(_key: &String) -> String {
         let var_name = format!("ANV_CONFIG__ACCOUNTS__{}__USERNAME", _key.to_uppercase());
@@ -153,10 +160,10 @@ impl AnvilopeConfig {
         // read individual config file sections into structs
         let llm = Self::parse_llm_section(&root_config)
             .expect("cannot parse [llm] section of config");
-        let accounts = Self::parse_accounts_section(&root_config)
-            .expect("cannot parse [accounts] section of config");
         let classifiers = Self::parse_classifiers_section(&root_config)
             .expect("cannot parse [classifier] section of config");
+        let accounts = Self::parse_accounts_section(&root_config, &classifiers)
+            .expect("cannot parse [accounts] section of config");
 
         // HACK
         let classes: Vec<Class> = Vec::new();
@@ -250,6 +257,21 @@ impl AnvilopeConfig {
         Ok(())
     }
 
+    pub fn account(&self, key: &String) -> Result<&Account> {
+        let acct = self.accounts
+            .iter()
+            .find(|a| a._key == *key)
+            .ok_or(anyhow::Error::msg("account lookup by key failed"))?;
+        Ok(acct)
+    }
+
+    pub fn classifier(&self, key: &String) -> Result<&Classifier> {
+        let clfr = self.classifiers
+            .get(key)
+            .ok_or(anyhow::Error::msg("classifier lookup by key failed"))?;
+        Ok(clfr)
+    }
+
     fn parse_llm_section(root: &Map<String, Value>) -> Result<Llm> {
         let section = root.get("llm")
             .ok_or(anyhow!("required [llm] section not present in config"))?
@@ -259,7 +281,7 @@ impl AnvilopeConfig {
         Ok(llm)
     }
 
-    fn parse_accounts_section(root: &Map<String, Value>) -> Result<Vec<Account>> {
+    fn parse_accounts_section(root: &Map<String, Value>, classifiers: &HashMap<String, Classifier>) -> Result<Vec<Account>> {
         let section = root.get("accounts")
             .ok_or(anyhow!("required [accounts] section is missing"))?;
         let keys = section.as_table()
@@ -280,7 +302,25 @@ impl AnvilopeConfig {
                 account_map.insert("password".to_string(), Value::String(Account::password_from_env(k)));
             }
 
-            let account = account_map.try_into()?;
+            let mut account: Account = account_map.try_into()?;
+
+            // Verify classifiers
+            for a in account.actions.iter() {
+                match a {
+                    Action::Copy { folder, condition } => {
+                        let _folder = folder;
+                        if let Some(classifier) = classifiers.get(&condition.classifier) {
+                            if classifier.classes.get(&condition.class).is_none() {
+                                return Err(anyhow!("specified class does not exist on classifier"));
+                            }
+                        } else {
+                            return Err(anyhow!("specified classifier does not exist"));
+                        }
+                        account.classifiers.insert(condition.classifier.to_owned());
+                    }
+                }
+            }
+
             accounts.push(account);
         }
 
@@ -296,7 +336,8 @@ impl AnvilopeConfig {
             .ok_or(anyhow!("malformed [classifiers] section"))?
             .iter()
             .try_for_each(|(s, v)| {
-                if let Ok(classifier) = v.to_owned().try_into() {
+                if let Ok(mut classifier) = v.to_owned().try_into::<Classifier>() {
+                    classifier._key = s.to_owned();
                     result.insert(s.to_owned(), classifier);
                     Ok(())
                 } else {

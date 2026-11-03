@@ -16,9 +16,16 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::Sender;
 
-use crate::anvilope_config;
+use crate::{
+    anvilope_config,
+    config,
+    db,
+    ClassifierClass,
+};
 use crate::db::{
-    Classifier, LlmCompletion, LlmJob, Message
+    LlmCompletion,
+    LlmJob,
+    Message,
 };
 use crate::AnvilopeEvent;
 use crate::mail::parse;
@@ -107,25 +114,22 @@ impl Llm  {
     /// Iterates through configuration and updates prompt records in the
     /// `classifier` database tables. Returns relevant IDs of active entries.
     pub async fn sync_prompts() -> Result<()> {
-        let db_classifiers = Classifier::get_active().await?;
+        let db_classifiers = db::Classifier::get_active().await?;
         let mut new_active_ids: Vec<i64> = Vec::new();
 
         for (key, classifier) in anvilope_config!().classifiers.iter() {
             let mut need_write = false;
             if let Some(db_copy) = db_classifiers.get(key) {
-                println!("db copy");
                 if !db_copy.equivalent_to(classifier) {
                     need_write = true;
                 } else {
                     new_active_ids.push(db_copy.id);
                 }
             } else {
-                println!("not found");
                 need_write = true;
             }
-            println!("\tclassifier {} -- need_write={}", key, need_write);
             if need_write {
-                let db_classifier = Classifier::create(
+                let db_classifier = db::Classifier::create(
                     key.to_owned(),
                     classifier.prompt.to_owned(),
                     &classifier.classes,
@@ -135,7 +139,7 @@ impl Llm  {
             }
         }
 
-        Classifier::set_active(&new_active_ids).await?;
+        db::Classifier::set_active(&new_active_ids).await?;
 
         Ok(())
     }
@@ -150,66 +154,59 @@ impl Llm  {
         Ok(())
     }
 
-    pub async fn classify(&self, message_id: i64) -> Result<LlmCompletion> {
-        let message = Message::get(message_id).await?
-            .ok_or(Error::msg("message not found in db"))?;
+    pub async fn classify(&self, classifier_key: &String, message: &Message) -> Result<ClassifierClass> {
+        let classifier = anvilope_config!().classifier(classifier_key)?;
 
         //
         // decide whether to read plain text or HTML content
         //
         // TODO: add config flag to prefer plain text
-        let mut body = "(body content could not be decoded)".to_string();
-        if message.body_html.len() > 0 {
+        let classify_prompt = if message.body_html.len() > 0 {
             // TODO: add config flag to allow for raw HTML
             if let Ok(body_md) = parse::html_to_markdown(&message.body_html) {
-                body = body_md;
+                prompt::assemble_prompt(
+                    classifier,
+                    &message.from_address,
+                    &message.from_name,
+                    &message.subject,
+                    &body_md,
+                )?
+            } else {
+                "(body html content could not be decoded)".to_string()
             }
         } else if message.body_plain.len() > 0 {
-            body = message.body_plain;
-        }
-
-        let classify_prompt = prompt::assemble_prompt(
-            &message.from_address,
-            &message.from_name,
-            &message.subject,
-            &body,
-        )?;
+            prompt::assemble_prompt(
+                classifier,
+                &message.from_address,
+                &message.from_name,
+                &message.subject,
+                &message.body_plain,
+            )?
+        } else {
+            "(no body content)".to_string()
+        };
 
         let mut chat = ClassificationChat::new(classify_prompt)?;
         self.run_chat(&mut chat).await?;
         let final_response = chat.last_message()?.content.clone();
 
-        // HACK: fix this for real
-        let classifier_id = Classifier::get_active().await?.get("default").unwrap().id;
-
-        let mut class_id: Option<i64> = None;
-        let mut class_key: Option<String> = None;
-        match self.process_llm_response(&final_response).await {
-            Ok((id, key)) => {
-                class_id = Some(id);
-                class_key = Some(key);
-            },
-            Err(e) => {
-                error!("process_llm_response: {:#?}", e);
-            },
-        };
+        let cc = self.process_llm_response(classifier, &final_response).await?;
 
         let full_trace = chat.full_trace()?;
 
-        let completion = LlmCompletion::create(
-            message_id,
-            classifier_id,
+        let _ = LlmCompletion::create(
+            message.id,
             final_response,
             full_trace,
-            class_id,
-            class_key,
+            cc.classifier.to_owned(),
+            Some(cc.class.to_owned()),
         ).await?;
 
-        Ok(completion)
+        Ok(cc)
     }
 
     /// Takes the LLM response and attempts to cleanly extract the chosen class.
-    pub async fn process_llm_response(&self, llm_response: &String) -> Result<(i64, String)> {
+    pub async fn process_llm_response(&self, classifier: &config::Classifier, llm_response: &String) -> Result<ClassifierClass> {
         // TODO: make custom llm error type
         let obj: Value = serde_json::from_str(llm_response.as_str())
             .map_err(|_| Error::msg("LLM response not valid JSON"))?;
@@ -221,10 +218,12 @@ impl Llm  {
         let class_v = obj[class_k].as_str()
             .ok_or(Error::msg("LLM repsonse contains unexpected type for \"class\" property"))?;
 
-        for (key, id) in self.class_key_id_map.iter() {
-            if key.to_lowercase() == class_v.to_lowercase() {
-                return Ok((id.to_owned(), key.to_owned()));
-            }
+        let cls_key = class_v.to_lowercase();
+        if classifier.classes.contains_key(&cls_key) {
+            return Ok(ClassifierClass {
+                classifier: classifier._key.to_owned(),
+                class: cls_key.to_owned()
+            })
         }
 
         Err(Error::msg("LLM response specified undefined class"))
@@ -238,28 +237,36 @@ impl Llm  {
                 None => break,
             };
 
-            info!("sending message_id={} to LLM", job.message_id);
-            let completion_result = self.classify(job.message_id).await;
+            let message = Message::get(job.message_id).await?
+                .ok_or(Error::msg("message not found in db"))?;
+            let acct = anvilope_config!().account(&message.account_key)?;
 
-            let mut job_failed = true;
-            if let Ok(completion) = completion_result {
-                if let Some(class_key) = completion.class_key {
-                    let message_id = completion.message_id;
-                    LlmJob::set_status(job.id, LlmJob::JOB_STATE_COMPLETED).await?;
-                    self.root_tx.send(AnvilopeEvent::MessageClassified {
-                        message_id,
-                        class_key,
-                    }).await?;
-                    job_failed = false;
-                }
-            } else if let Err(e) = completion_result {
-                error!("classify: {:#?}", e);
+            let mut classes: Vec<ClassifierClass> = Vec::new();
+            let mut success = true;
+            for clfr_key in acct.classifiers.iter() {
+                info!("sending message_id={} to LLM for classifier={}", job.message_id, clfr_key);
+                match self.classify(&clfr_key, &message).await {
+                    Ok(cc) => {
+                        classes.push(cc);
+                    },
+                    Err(e) => {
+                        error!("classify: {:#?}", e);
+                        success = false;
+                        break;
+                    }
+                };
             }
-            if job_failed {
+
+            if success {
+                LlmJob::set_status(job.id, LlmJob::JOB_STATE_COMPLETED).await?;
+                self.root_tx.send(AnvilopeEvent::MessageClassified {
+                    message_id: message.id,
+                    classes,
+                }).await?;
+            } else {
                 LlmJob::set_status(job.id, LlmJob::JOB_STATE_FAILED).await?;
             }
         }
-
         Ok(())
     }
 }

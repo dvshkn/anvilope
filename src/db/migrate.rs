@@ -102,8 +102,13 @@ fn migrate_005_rename_message_table_class_keys_column(conn: &Connection) -> Resu
         "UPDATE message SET class_key = ? || class_key || ? WHERE class_key IS NOT NULL",
         ["[\"default.", "\"]"]
     )?;
+    conn.execute(
+        "UPDATE message SET class_key = ? WHERE class_key IS NULL",
+        ["[]"]
+    )?;
 
     exec_sql_string(conn, "ALTER TABLE message RENAME COLUMN class_key TO class_keys")?;
+    exec_sql_string(conn, "ALTER TABLE message ALTER COLUMN class_keys SET NOT NULL")?;
 
     Ok(())
 }
